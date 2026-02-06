@@ -1,4 +1,4 @@
-"""Chat handling with Gemini API."""
+"""Chat handling with Google Gemini API."""
 import os
 from typing import AsyncIterator
 
@@ -8,8 +8,8 @@ from .context import ConversationContext
 logger = get_logger(__name__)
 
 
-class ChatHandler:
-    """Handles conversation with Gemini API."""
+class GeminiChatHandler:
+    """Handles conversation with Google Gemini API."""
 
     def __init__(
         self,

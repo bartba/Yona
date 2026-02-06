@@ -14,7 +14,7 @@ from src.audio.audio_buffer import AudioBuffer
 from src.audio.vad import VoiceActivityDetector
 from src.wake_word.detector import WakeWordDetector
 from src.stt.transcriber import Transcriber
-from src.llm.chat_handler import ChatHandler
+from src.llm import ChatHandler, create_chat_handler
 from src.tts.synthesizer import Synthesizer
 from src.utils.logger import get_logger, setup_logging
 
@@ -104,8 +104,8 @@ class YonaApp:
 
         # Chat handler
         try:
-            self._chat_handler = ChatHandler(
-                model=self._config.llm.get("model", "gemini-2.5-flash"),
+            self._chat_handler = create_chat_handler(
+                model=self._config.llm.get("model"),
                 max_tokens=self._config.llm.get("max_tokens", 1024),
                 temperature=self._config.llm.get("temperature", 0.7),
                 system_prompt=self._config.get_system_prompt(),
