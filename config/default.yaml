@@ -1,0 +1,50 @@
+audio:
+  input_device: "Poly BT600"
+  output_device: "Poly BT600"
+  input_sample_rate: 16000
+  output_sample_rate: 48000
+  input_channels: 1
+  output_channels: 2
+  chunk_size: 512
+  buffer_seconds: 30
+
+wake_word:
+  model_path: "models/wake_word/hi_samsung.onnx"
+  threshold: 0.5
+  cooldown_seconds: 2.0
+
+vad:
+  energy_threshold: 0.01
+  silence_duration: 1.5
+  min_speech_duration: 0.3
+
+stt:
+  model_size: "small"
+  device: "cuda"
+  compute_type: "float16"
+  language: null  # Auto-detect
+
+llm:
+  model: "gemini-2.5-flash"
+  max_tokens: 1024
+  temperature: 0.7
+  max_history_turns: 20
+
+tts:
+  match_input_language: true
+  voices:
+    ko: "ko-KR-SunHiNeural"
+    en: "en-US-JennyNeural"
+  default_voice: "ko-KR-SunHiNeural"
+
+conversation:
+  timeout_seconds: 60
+  timeout_message:
+    ko: "대화를 원하시면 다시 불러주세요."
+    en: "Call me again when you want to chat."
+
+logging:
+  level: "INFO"
+  file: "logs/yona.log"
+  max_bytes: 10485760
+  backup_count: 5
