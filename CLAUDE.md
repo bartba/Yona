@@ -6,7 +6,7 @@ A voice chat application for Nvidia Jetson Orin Nano with Polycom Sync 20 Plus s
 ## Tech Stack
 - **Wake Word**: openWakeWord (custom ONNX model for "하이 삼성" / "Hi Samsung")
 - **STT**: faster-whisper (small model, CUDA acceleration)
-- **LLM**: Google Gemini 2.5 Flash API or local Ollama (gemma3:4b)
+- **LLM**: local Ollama (gemma3:4b)
 - **TTS**: Edge TTS (Korean: ko-KR-SunHiNeural, English: en-US-JennyNeural)
 - **Audio**: sounddevice + numpy (16kHz input, 48kHz output)
 
@@ -29,7 +29,6 @@ src/
 │   └── transcriber.py   # faster-whisper STT
 ├── llm/
 │   ├── base.py          # ChatHandler Protocol (interface)
-│   ├── gemini_handler.py # Google Gemini API handler
 │   ├── ollama_handler.py # Local Ollama handler
 │   └── context.py       # Conversation history (max 20 turns)
 └── tts/
@@ -54,7 +53,7 @@ python -m src.wake_word.trainer --record-positive --wake-word hi_samsung
 ## Configuration
 - Main config: `config/default.yaml`
 - System prompt: `config/prompts/system_prompt.txt`
-- Environment: `.env` (LLM_PROVIDER, GOOGLE_API_KEY, OLLAMA_MODEL, OLLAMA_URL)
+- Environment: `.env` (LLM_PROVIDER, OLLAMA_MODEL, OLLAMA_URL)
 
 ## State Machine Flow
 ```

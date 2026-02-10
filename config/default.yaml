@@ -25,8 +25,7 @@ stt:
   language: null  # Auto-detect
 
 llm:
-  # model is optional - defaults to provider-specific model
-  # gemini: "gemini-2.5-flash", ollama: uses OLLAMA_MODEL env var
+  # model is optional - defaults to OLLAMA_MODEL env var (gemma3:4b)
   model: null
   max_tokens: 1024
   temperature: 0.7

@@ -25,18 +25,9 @@ def create_chat_handler(
     Raises:
         ValueError: If LLM_PROVIDER is not recognized.
     """
-    provider = os.environ.get("LLM_PROVIDER", "gemini").lower().strip()
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower().strip()
 
-    if provider == "gemini":
-        from .gemini_handler import GeminiChatHandler
-
-        return GeminiChatHandler(
-            model=model or "gemini-2.5-flash",
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system_prompt=system_prompt,
-        )
-    elif provider == "ollama":
+    if provider == "ollama":
         from .ollama_handler import OllamaChatHandler
 
         return OllamaChatHandler(
@@ -49,7 +40,7 @@ def create_chat_handler(
     else:
         raise ValueError(
             f"Unknown LLM_PROVIDER: '{provider}'. "
-            f"Supported: 'gemini', 'ollama'"
+            f"Supported: 'ollama'"
         )
 
 
