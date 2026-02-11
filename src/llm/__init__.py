@@ -37,10 +37,20 @@ def create_chat_handler(
             temperature=temperature,
             system_prompt=system_prompt,
         )
+    elif provider == "openai":
+        from .openai_handler import OpenAIChatHandler
+
+        return OpenAIChatHandler(
+            model=model or os.environ.get("OPENAI_MODEL", "gpt-5-nano"),
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt,
+        )
     else:
         raise ValueError(
             f"Unknown LLM_PROVIDER: '{provider}'. "
-            f"Supported: 'ollama'"
+            f"Supported: 'ollama', 'openai'"
         )
 
 
