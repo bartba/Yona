@@ -31,7 +31,7 @@ def create_chat_handler(
         from .ollama_handler import OllamaChatHandler
 
         return OllamaChatHandler(
-            model=model or os.environ.get("OLLAMA_MODEL", "gemma3:4b"),
+            model=model or os.environ.get("OLLAMA_MODEL", "llama3.1:8b"),
             base_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
             max_tokens=max_tokens,
             temperature=temperature,

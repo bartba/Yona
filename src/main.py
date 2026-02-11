@@ -52,9 +52,10 @@ class YonaApp:
         )
         self._vad = VoiceActivityDetector(
             sample_rate=self._config.audio.get("input_sample_rate", 16000),
-            energy_threshold=self._config.vad.get("energy_threshold", 0.01),
+            threshold=self._config.vad.get("threshold", 0.5),
             silence_duration=self._config.vad.get("silence_duration", 1.5),
             min_speech_duration=self._config.vad.get("min_speech_duration", 0.3),
+            model_path=self._config.vad.get("model_path"),
         )
 
         # Processing components
@@ -94,7 +95,7 @@ class YonaApp:
         # Speech-to-text
         try:
             self._transcriber = Transcriber(
-                model_size=self._config.stt.get("model_size", "small"),
+                model_size=self._config.stt.get("model_size", "medium"),
                 device=self._config.stt.get("device", "cuda"),
                 compute_type=self._config.stt.get("compute_type", "float16"),
                 language=self._config.stt.get("language"),

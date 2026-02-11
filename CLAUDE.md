@@ -5,9 +5,10 @@ A voice chat application for Nvidia Jetson Orin Nano with Polycom Sync 20 Plus s
 
 ## Tech Stack
 - **Wake Word**: openWakeWord (custom ONNX model for "하이 삼성" / "Hi Samsung")
-- **STT**: faster-whisper (small model, CUDA acceleration)
-- **LLM**: local Ollama (gemma3:4b) or OpenAI (gpt-5-nano)
+- **STT**: faster-whisper (medium model, CUDA acceleration)
+- **LLM**: Ollama (llama3.1:8b, remote LAN GPU server) or OpenAI (gpt-5-nano)
 - **TTS**: Edge TTS (Korean: ko-KR-SunHiNeural, English: en-US-JennyNeural)
+- **VAD**: Silero VAD (ONNX, CPU inference)
 - **Audio**: sounddevice + numpy (16kHz input, 48kHz output)
 
 ## Project Structure
@@ -20,7 +21,7 @@ src/
 │   └── config.py        # YAML config loader
 ├── audio/
 │   ├── audio_manager.py # Polycom device I/O
-│   ├── vad.py           # Energy-based voice activity detection
+│   ├── vad.py           # Silero VAD voice activity detection
 │   └── audio_buffer.py  # Ring buffer for audio
 ├── wake_word/
 │   ├── detector.py      # openWakeWord integration

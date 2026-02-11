@@ -23,7 +23,7 @@ class Transcriber:
 
     def __init__(
         self,
-        model_size: str = "small",
+        model_size: str = "medium",
         device: str = "cuda",
         compute_type: str = "float16",
         language: str | None = None,

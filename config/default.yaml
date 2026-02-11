@@ -14,18 +14,19 @@ wake_word:
   cooldown_seconds: 2.0
 
 vad:
-  energy_threshold: 0.01
+  model_path: "models/silero_vad/silero_vad.onnx"
+  threshold: 0.5
   silence_duration: 1.5
   min_speech_duration: 0.3
 
 stt:
-  model_size: "small"
+  model_size: "medium"
   device: "cuda"
   compute_type: "float16"
   language: null  # Auto-detect
 
 llm:
-  # model is optional - defaults to OLLAMA_MODEL env var (gemma3:4b)
+  # model is optional - defaults to OLLAMA_MODEL env var (llama3.1:8b)
   model: null
   max_tokens: 1024
   temperature: 0.7

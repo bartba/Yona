@@ -16,7 +16,7 @@ class OllamaChatHandler:
 
     def __init__(
         self,
-        model: str = "gemma3:4b",
+        model: str = "llama3.1:8b",
         base_url: str | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.7,
