@@ -6,7 +6,7 @@ A voice chat application for Nvidia Jetson Orin Nano with Polycom Sync 20 Plus s
 ## Tech Stack
 - **Wake Word**: openWakeWord (custom ONNX model for "하이 삼성" / "Hi Samsung")
 - **STT**: faster-whisper (small model, CUDA acceleration)
-- **LLM**: local Ollama (gemma3:4b)
+- **LLM**: local Ollama (gemma3:4b) or OpenAI (gpt-5-nano)
 - **TTS**: Edge TTS (Korean: ko-KR-SunHiNeural, English: en-US-JennyNeural)
 - **Audio**: sounddevice + numpy (16kHz input, 48kHz output)
 
@@ -28,9 +28,10 @@ src/
 ├── stt/
 │   └── transcriber.py   # faster-whisper STT
 ├── llm/
-│   ├── base.py          # ChatHandler Protocol (interface)
+│   ├── base.py           # ChatHandler Protocol (interface)
 │   ├── ollama_handler.py # Local Ollama handler
-│   └── context.py       # Conversation history (max 20 turns)
+│   ├── openai_handler.py # OpenAI API handler
+│   └── context.py        # Conversation history (max 20 turns)
 └── tts/
     └── synthesizer.py   # Edge TTS wrapper
 ```
@@ -53,7 +54,7 @@ python -m src.wake_word.trainer --record-positive --wake-word hi_samsung
 ## Configuration
 - Main config: `config/default.yaml`
 - System prompt: `config/prompts/system_prompt.txt`
-- Environment: `.env` (LLM_PROVIDER, OLLAMA_MODEL, OLLAMA_URL)
+- Environment: `.env` (LLM_PROVIDER, OLLAMA_MODEL, OLLAMA_URL, OPENAI_API_KEY, OPENAI_MODEL)
 
 ## State Machine Flow
 ```
@@ -80,5 +81,5 @@ IDLE (wake word) → LISTENING (VAD) → PROCESSING (STT+LLM) → SPEAKING (TTS)
 
 ## Current Status
 - Core implementation complete
-- 36 unit tests passing
+- 45 unit tests passing
 - Needs: wake word model training, hardware integration testing
