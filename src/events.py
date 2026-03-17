@@ -109,7 +109,7 @@ class EventBus:
 
         Returns a new :class:`asyncio.Queue` that will receive every
         :class:`Event` published for that type.  The caller owns the queue
-        and should call :meth:`unsubscribe` when done.
+        and should call :method:`unsubscribe` when done.
         """
         q: asyncio.Queue[Event] = asyncio.Queue()
         self._subscribers[event_type].append(q)

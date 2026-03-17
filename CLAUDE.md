@@ -10,10 +10,10 @@ See **`plan.md`** in the project root for the full step-by-step build plan and p
 Start each new session with: *"plan.md의 Step N을 진행합시다"*
 
 ## Tech Stack
-- **Wake Word**: Porcupine (Picovoice) — "Hi Inspector" / "하이 검사기"
+- **Wake Word**: openWakeWord (ONNX, fully offline) — "Hi Inspector"
 - **STT**: faster-whisper `large-v3-turbo`, CUDA float16
-- **LLM**: OpenAI GPT **or** Custom company LLM (selectable via `LLM_PROVIDER` env var)
-- **TTS**: XTTS v2 (Coqui), local GPU, 24 kHz
+- **LLM**: OpenAI GPT **or** Claude (Anthropic) **or** Custom company LLM (selectable via `LLM_PROVIDER` env var)
+- **TTS**: MeloTTS (default, Korean+English) **or** Kokoro TTS (English only, no Korean voice in v1.0) — CPU mode, 24 kHz, `tts.provider` config
 - **VAD**: Silero VAD (ONNX), used for both speech detection and barge-in monitoring
 - **Audio**: sounddevice + numpy — 16 kHz input / 48 kHz output
 
@@ -25,10 +25,10 @@ src/
 ├── state.py       # ConversationState + StateMachine (6 states)
 ├── audio.py       # AudioManager + AudioBuffer + ChimePlayer
 ├── vad.py         # VoiceActivityDetector (Silero ONNX)
-├── wake.py        # WakeWordDetector (Porcupine)
+├── wake.py        # WakeWordDetector (openWakeWord, ONNX)
 ├── stt.py         # Transcriber (faster-whisper)
 ├── llm.py         # ChatHandler Protocol + Context + History + providers + factory
-├── tts.py         # Synthesizer (XTTS v2)
+├── tts.py         # Synthesizer Protocol + KokoroSynthesizer + MeloSynthesizer + factory
 ├── pipeline.py    # PhraseAccumulator + StreamingPipeline (producer-consumer)
 └── main.py        # YonaApp orchestrator + CLI
 ```
@@ -55,21 +55,29 @@ python -m src.main --list-devices
 
 ## Environment Variables
 ```bash
-LLM_PROVIDER=openai          # "openai" or "custom"
+LLM_PROVIDER=openai          # "openai" | "claude" | "custom"
+
+# OpenAI
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
+
+# Claude / Anthropic
+CLAUDE_API_KEY=sk-ant-...
+CLAUDE_MODEL=claude-sonnet-4-6
+
+# Custom LLM
 CUSTOM_LLM_URL=http://...
 CUSTOM_LLM_KEY=...
 CUSTOM_LLM_MODEL=...
-PORCUPINE_ACCESS_KEY=...
+
 ```
 
 ## Hardware (Confirmed)
-- Nvidia Jetson Orin Nano (CUDA for STT + TTS)
+- Nvidia Jetson Orin Nano (CUDA for STT, CPU for TTS + wake word)
 - Polycom Sync 20 Plus — USB direct connection (`Poly Sync 20`, hw:0,0)
   - `input_channels: 1` (mono, HW beamforming + AEC inside device)
   - `output_channels: 2` (stereo USB, verified)
-  - `chunk_size: 512` = 32 ms @ 16 kHz = Porcupine `frame_length`
+  - `chunk_size: 512` = 32 ms @ 16 kHz (openWakeWord accepts any size, internally buffers 1280)
 - PortAudio: `sudo apt install libportaudio2`
 
 ## State Machine
@@ -91,6 +99,15 @@ LLM tokens → PhraseAccumulator → Queue[str] → TTS Worker → Queue[audio] 
                                                                 ↑
                                               barge-in VAD monitors mic in parallel
 ```
+
+## V3 Roadmap (구현 예정)
+
+### PTT — Poly Sync 20 Call 버튼으로 Push-to-Talk
+- Poly Sync 20 Call 버튼 → USB HID telephony 이벤트 → Linux `evdev`/`hidraw`로 캡처
+- IDLE 상태에서 누르면 wake word 없이 즉시 LISTENING 진입
+- LISTENING/SPEAKING 상태에서 누르면 강제 IDLE 복귀
+- `src/wake.py` 또는 별도 `src/ptt.py`에 `PttDetector` 구현 예정
+- HID: VID `047f` (Poly), Usage Page 0x0B (Telephony), `lsusb`로 PID 확인 필요
 
 ## Code Conventions
 - Python 3.10+ with type hints

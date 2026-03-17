@@ -42,6 +42,7 @@ logs/
 # Models (large files)
 models/wake_word/*.onnx
 models/wake_word/training_data/
+models/tts/
 
 # Cache
 .cache/

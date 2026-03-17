@@ -1,14 +1,19 @@
+# Yona v2 — runtime dependencies (matches pyproject.toml [project.dependencies])
+openwakeword>=0.6.0
+faster-whisper>=1.0.0
+openai>=1.0.0
+anthropic>=0.40.0
+httpx>=0.27.0
+# melotts: PyPI package is broken — install from source instead:
+#   pip install git+https://github.com/myshell-ai/MeloTTS.git
+#   python -m unidic download
+onnxruntime>=1.16.0
 sounddevice>=0.4.6
 numpy>=1.24.0
-pydub>=0.25.1
-openwakeword>=0.5.0
-onnxruntime>=1.16.0
-faster-whisper>=0.10.0
-edge-tts>=6.1.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
 aiofiles>=23.2.0
-httpx>=0.27.0
-openai>=1.0.0
+
+# Development / test
 pytest>=7.4.0
 pytest-asyncio>=0.21.0

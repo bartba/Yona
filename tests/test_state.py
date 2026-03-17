@@ -123,13 +123,13 @@ class TestCanTransition:
         await sm.transition(ConversationState.PROCESSING)
         assert sm.can_transition(ConversationState.IDLE) is True
 
-    # PROCESSING denied
+    # PROCESSING → LISTENING allowed (empty STT → resume listening)
     @pytest.mark.asyncio
-    async def test_processing_denies_listening(self):
+    async def test_processing_allows_listening(self):
         sm = StateMachine()
         await sm.transition(ConversationState.LISTENING)
         await sm.transition(ConversationState.PROCESSING)
-        assert sm.can_transition(ConversationState.LISTENING) is False
+        assert sm.can_transition(ConversationState.LISTENING) is True
 
     # SPEAKING allowed
     @pytest.mark.asyncio

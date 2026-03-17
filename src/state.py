@@ -59,6 +59,7 @@ _TRANSITIONS: dict[ConversationState, frozenset[ConversationState]] = {
     }),
     ConversationState.PROCESSING: frozenset({
         ConversationState.SPEAKING,
+        ConversationState.LISTENING,
         ConversationState.IDLE,
     }),
     ConversationState.SPEAKING: frozenset({

@@ -5,28 +5,29 @@ audio:
   input_device: "Poly Sync 20"     # USB direct (hw:0,0) — lower latency than BT600 (hw:1,0)
   output_device: "Poly Sync 20"
   input_sample_rate: 16000         # Hz — required by Porcupine & Whisper
-  output_sample_rate: 48000        # Hz — upsampled from XTTS 24 kHz before playback
+  output_sample_rate: 48000        # Hz — upsampled from TTS output before playback
   input_channels: 1                # confirmed: Sync 20 Plus DSP delivers mono (beamforming+AEC done in HW)
   output_channels: 2               # confirmed: USB audio shows 2 out (hw verified)
   chunk_size: 512                  # samples/callback = 32 ms @ 16 kHz; matches Porcupine frame_length
   buffer_seconds: 30               # ring-buffer = ~1.9 MB; holds the longest expected utterance
-  chime_path: null                 # path to chime.wav; null = generate programmatically
+  chime_path: "sound/mixkit-magic-marimba-2820.wav"  # path to chime.wav; null = generate programmatically
 
 wake_word:
-  access_key: "${PORCUPINE_ACCESS_KEY}"
-  keyword_paths:
-    - "models/wake_word/hi_inspector_en.ppn"
-    - "models/wake_word/hi_inspector_ko.ppn"
-  sensitivities: [0.5, 0.5]        # per-keyword, range 0.0-1.0
-  cooldown_seconds: 2.0            # ignore re-triggers for N seconds
+  model_paths:
+    - "models/wake_word/hey_jarvis_v0.1.onnx"   # pretrained; replace with hi_inspector.onnx after custom training
+  active_models:
+    - "hey_jarvis"
+  inference_framework: "onnx"        # "onnx" or "tflite"
+  threshold: 0.5                     # score cutoff for detection (0.0-1.0)
+  patience: 3                        # consecutive frames above threshold to trigger
+  cooldown_seconds: 2.0              # ignore re-triggers for N seconds
 
 vad:
   model_path: "models/silero_vad/silero_vad.onnx"
   threshold: 0.5                   # speech probability cutoff (LISTENING)
-  silence_duration: 1.5            # seconds of silence to end a speech segment
+  silence_duration: 0.8            # seconds of silence to end a speech segment
   min_speech_duration: 0.3         # minimum speech length to accept
   barge_in_threshold: 0.7          # higher threshold during SPEAKING (AEC residual)
-  barge_in_silence_duration: 0.3   # shorter silence window for barge-in detection
 
 stt:
   model_size: "large-v3-turbo"
@@ -42,10 +43,16 @@ llm:
   openai_api_key: "${OPENAI_API_KEY}"
   openai_model: "${OPENAI_MODEL}"
 
-  # --- Custom company LLM (provider=custom) ---
-  custom_url: "${CUSTOM_LLM_URL}"
-  custom_key: "${CUSTOM_LLM_KEY}"
-  custom_model: "${CUSTOM_LLM_MODEL}"
+  # --- Claude / Anthropic (provider=claude) ---
+  claude_api_key: "${CLAUDE_API_KEY}"
+  claude_model: "${CLAUDE_MODEL}"
+
+  # --- Samsung Gauss OpenAPI (provider=custom) ---
+  custom_url: "${CUSTOM_LLM_URL}"                    # {ENDPOINT_URL}/openapi/chat/v1/messages
+  custom_key: "${CUSTOM_LLM_KEY}"                    # x-openapi-token (Bearer token)
+  custom_client_token: "${CUSTOM_LLM_CLIENT_TOKEN}"  # x-generative-ai-client (JWT)
+  custom_model_id: "${CUSTOM_LLM_MODEL_ID}"          # UUID e.g. "0196f1fc-2858-70a9-..."
+  custom_user_email: "${CUSTOM_LLM_USER_EMAIL}"      # optional portal email
 
   # --- Common ---
   max_tokens: 1024
@@ -53,10 +60,16 @@ llm:
   max_history_turns: 20            # keeps last N user+assistant pairs
 
 tts:
-  model_name: "tts_models/multilingual/multi-dataset/xtts_v2"
-  speaker_wav: null                # path to reference WAV for voice cloning
-  device: "cuda"
-  output_sample_rate: 24000        # XTTS v2 native output rate
+  # Provider: "melo" (MeloTTS — Korean + English bilingual)
+  provider: "melo"
+
+  # --- MeloTTS --- Korean + English bilingual
+  melo_language: "KR"              # "KR" or "EN" (default for init; pipeline switches dynamically)
+  melo_device: "cpu"               # "cpu" recommended (save GPU for STT)
+  melo_speed: 1.0                  # speaking speed multiplier
+
+  # --- Common ---
+  output_sample_rate: 24000        # native output rate (MeloTTS)
 
 conversation:
   timeout_check_seconds: 15        # silence -> ask "Are you still there?"
@@ -72,8 +85,8 @@ conversation:
     en: "Goodbye! Have a great day!"
 
 history:
-  storage_dir: "data/history"      # weekly JSON summaries stored here
-  max_weeks: 4                     # discard summaries older than N weeks
+  storage_dir: "data/history"      # daily JSON files stored here (YYYY-MM-DD.json)
+  max_days: 365                    # discard files older than N days (1 year)
 
 logging:
   level: "INFO"
