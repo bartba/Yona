@@ -1,4 +1,4 @@
-"""main.py — YonaApp orchestrator and CLI entry point for Yona v2.
+"""main.py — Orchestrator and CLI entry point.
 
 Wires together all components (audio, VAD, wake word, STT, LLM, TTS,
 pipeline) and drives the conversation state machine via EventBus events.
@@ -36,14 +36,14 @@ logger = logging.getLogger(__name__)
 
 # Goodbye intent patterns (Korean + English)
 _GOODBYE_RE = re.compile(
-    r"안녕|잘\s*가|종료|그만|바이바이"
+    r"안녕|잘\s*가|종료|그만|이만|바이바이"
     r"|\bbye\b|\bgoodbye\b|\bsee\s+you\b|\bthat'?s\s+all\b",
     re.IGNORECASE,
 )
 
 
 class YonaApp:
-    """Main Yona voice chat orchestrator.
+    """Main voice assistant orchestrator.
 
     Creates all components, registers the sounddevice audio callback,
     subscribes to EventBus events, and manages the conversation state
@@ -56,17 +56,17 @@ class YonaApp:
         self._sm = StateMachine(self._bus)
         self._running = False
 
-        # Background tasks
-        self._timeout_task: asyncio.Task | None = None
-        self._process_task: asyncio.Task | None = None
-        self._handler_tasks: list[asyncio.Task] = []
+        # Background tasks defined by "life cycle"  : _timeout_task 와 _process_task 는 수시로 개별 생성/취소
+        self._timeout_task: asyncio.Task | None = None # 사용자가 말하면 취소하고 다시 시작(리셋), 대화별로 생성/취소
+        self._process_task: asyncio.Task | None = None # 발화 하나당 한번 생성(STT->LLM->TTS), 발화별로 생성/취소
+        self._handler_tasks: list[asyncio.Task] = []   # 앱이 실행되는 동안 살아있는 리스너들 (묶어서 처리)
 
         # Timeout settings
         self._timeout_check_sec: float = cfg.get(
             "conversation.timeout_check_seconds", 15,
         )
         self._timeout_final_sec: float = cfg.get(
-            "conversation.timeout_final_seconds", 15,
+            "conversation.timeout_final_seconds", 5,
         )
 
         # Components — created in _init_components()
@@ -205,6 +205,7 @@ class YonaApp:
 
     async def _process_utterance(self) -> None:
         """STT → goodbye check → LLM+TTS pipeline → back to LISTENING."""
+        """사용자가 말을 끝낸 순간(SPEECH_ENDED)부터 시작, assistant가 대답을 끝내고 다시 듣기 시작하는 순간까지의 모든것 처리"""
         try:
             audio = self._buffer.get_all()
             self._buffer.reset()
@@ -306,7 +307,7 @@ class YonaApp:
         try:
             # Stage 1: silence for timeout_check_seconds
             await asyncio.sleep(self._timeout_check_sec)
-            if self._sm.state not in (CS.LISTENING, CS.SPEAKING):
+            if self._sm.state != CS.LISTENING:
                 return
 
             await self._sm.transition(CS.TIMEOUT_CHECK)
@@ -387,7 +388,7 @@ class YonaApp:
         await self._audio.start()
 
         self._running = True
-        logger.info("Yona is ready! Say the wake word to start.")
+        logger.info("Voice assistant is now ready! Say the wake word to start.")
 
         # Start event handler tasks
         self._handler_tasks = [
@@ -419,7 +420,7 @@ class YonaApp:
         if not self._running:
             return
         self._running = False
-        logger.info("Shutting down Yona...")
+        logger.info("Shutting down voice assistant...")
 
         # Cancel timeout
         self._cancel_timeout()
@@ -450,7 +451,7 @@ class YonaApp:
         if self._synth and hasattr(self._synth, "close"):
             await self._synth.close()
 
-        logger.info("Yona stopped")
+        logger.info("Voice assistant stopped")
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +468,7 @@ def main() -> None:
     """CLI entry point for ``python -m src.main``."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Yona Voice Chat")
+    parser = argparse.ArgumentParser(description="Voice Assistant")
     parser.add_argument("--config", type=str, help="Path to config YAML")
     parser.add_argument(
         "--list-devices", action="store_true", help="List audio devices and exit",

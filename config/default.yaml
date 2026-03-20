@@ -65,7 +65,7 @@ tts:
 
   # --- MeloTTS --- Korean + English bilingual
   melo_language: "KR"              # "KR" or "EN" (default for init; pipeline switches dynamically)
-  melo_device: "cpu"               # "cpu" recommended (save GPU for STT)
+  melo_device: "cpu"               # "cpu" or "cuda" (cuda requires torch+CUDA; falls back to cpu if unavailable)
   melo_speed: 1.0                  # speaking speed multiplier
 
   # --- Common ---
@@ -73,7 +73,7 @@ tts:
 
 conversation:
   timeout_check_seconds: 15        # silence -> ask "Are you still there?"
-  timeout_final_seconds: 15        # more silence -> say goodbye -> IDLE
+  timeout_final_seconds: 5         # more silence -> say goodbye -> IDLE
   timeout_check_message:
     ko: "아직 계세요?"
     en: "Are you still there?"

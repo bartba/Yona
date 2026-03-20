@@ -2,11 +2,11 @@
 
 Provides:
   Synthesizer          — typing.Protocol for all TTS backends
-  MeloSynthesizer      — MeloTTS (VITS, CPU, 24 kHz, Korean + English)
+  MeloSynthesizer      — MeloTTS (VITS, CPU/CUDA, 24 kHz, Korean + English)
   create_synthesizer   — factory: reads tts.provider and returns the right backend
 
-MeloSynthesizer runs CPU-bound inference in ``asyncio.to_thread`` so it
-never blocks the asyncio event loop.
+MeloSynthesizer runs inference in ``asyncio.to_thread`` so it never
+blocks the asyncio event loop (PyTorch calls are blocking on both CPU and CUDA).
 
 Usage::
 
@@ -64,21 +64,23 @@ class Synthesizer(Protocol):
 # ---------------------------------------------------------------------------
 
 class MeloSynthesizer:
-    """MeloTTS synthesizer (VITS, CPU).
+    """MeloTTS synthesizer (VITS, CPU or CUDA).
 
     Uses the ``melo`` package which provides a simple ``TTS`` class.
-    Synthesis runs in a thread executor.
+    Synthesis runs in a thread executor (blocking PyTorch call).
 
     Args:
         cfg: App config — reads ``tts.melo_language``, ``tts.melo_device``,
              ``tts.melo_speed``, ``tts.output_sample_rate``.
     """
 
+    _VALID_DEVICES = ("cpu", "cuda")
+
     def __init__(self, cfg: Config) -> None:
         from melo.api import TTS
 
         self._language: str = cfg.get("tts.melo_language", "KR")
-        self._device: str = cfg.get("tts.melo_device", "cpu")
+        self._device: str = self._resolve_device(cfg.get("tts.melo_device", "cpu"))
         self._speed: float = cfg.get("tts.melo_speed", 1.0)
         self._sample_rate: int = cfg.get("tts.output_sample_rate", 24000)
 
@@ -91,8 +93,30 @@ class MeloSynthesizer:
             self._language, self._device, self._speed, self._speaker_id,
         )
 
+    @classmethod
+    def _resolve_device(cls, requested: str) -> str:
+        """Validate and resolve the device string.
+
+        Returns ``"cpu"`` or ``"cuda"``.  If ``"cuda"`` is requested but
+        unavailable, falls back to ``"cpu"`` with a warning.
+        """
+        device = requested.lower().strip()
+        if device not in cls._VALID_DEVICES:
+            raise ValueError(
+                f"Invalid tts.melo_device: {requested!r}. "
+                f"Must be one of {cls._VALID_DEVICES}."
+            )
+        if device == "cuda":
+            import torch
+            if not torch.cuda.is_available():
+                logger.warning(
+                    "CUDA requested for MeloTTS but not available — falling back to CPU"
+                )
+                return "cpu"
+        return device
+
     async def synthesize(self, text: str) -> tuple[np.ndarray, int]:
-        """Synthesize *text* to audio using MeloTTS (CPU, in thread)."""
+        """Synthesize *text* to audio using MeloTTS (in thread)."""
         samples = await asyncio.to_thread(
             self._synthesize_sync,
             text,

@@ -99,7 +99,7 @@ def simple_cfg(tmp_path) -> Config:
           model_size: "large-v3-turbo"
         conversation:
           timeout_check_seconds: 15
-          timeout_final_seconds: 15
+          timeout_final_seconds: 5
     """)
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(content)

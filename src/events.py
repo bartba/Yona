@@ -49,7 +49,7 @@ class EventType(Enum):
 
     # --- Session control ---
     TIMEOUT_CHECK    = auto()     # 15 s idle → ask "아직 계세요?"
-    TIMEOUT_FINAL    = auto()     # 15 s more → farewell → IDLE
+    TIMEOUT_FINAL    = auto()     # 5 s more → farewell → IDLE
     GOODBYE_DETECTED = auto()     # Goodbye intent recognised
 
     # --- System ---

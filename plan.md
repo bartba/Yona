@@ -39,7 +39,7 @@ src/
 | Barge-in | VAD during SPEAKING → stop TTS immediately → LISTENING |
 | AEC | Polycom Sync 20 Plus hardware AEC (USB direct, confirmed) |
 | Goodbye intent | Keyword pattern match → farewell TTS → IDLE |
-| Two-stage timeout | 15 s → "아직 계세요?" → 15 s → farewell → IDLE |
+| Two-stage timeout | 15 s → "아직 계세요?" → 5 s → farewell → IDLE |
 | History | In-session context + weekly JSON summary on disk |
 | Language | Korean / English auto-detect, respond in same language |
 
@@ -73,7 +73,7 @@ SPEAKING ──(playback done)──────→ LISTENING
 SPEAKING ──(barge-in VAD)───────→ LISTENING
 LISTENING/SPEAKING ──(15 s)─────→ TIMEOUT_CHECK
 TIMEOUT_CHECK ──(speech)────────→ LISTENING
-TIMEOUT_CHECK ──(15 s more)─────→ TIMEOUT_FINAL → IDLE
+TIMEOUT_CHECK ──(5 s more)─────→ TIMEOUT_FINAL → IDLE
 SPEAKING/PROCESSING ──(goodbye)─→ IDLE
 ```
 
@@ -140,7 +140,7 @@ CUSTOM_LLM_MODEL=your-model-name
 
 ## Pre-flight Checklist
 
-- [ ] Train "Hi Inspector" custom wake word model → `hi_inspector.onnx` (openWakeWord)
+- [x] Train "Hi Inspector" custom wake word model → `hi_inspector.onnx` (openWakeWord)
 - [ ] Download MeloTTS Korean model (pip install 시 자동)
 - [ ] Verify GPU memory: large-v3-turbo (~1.5 GB) + TTS CPU mode on Jetson 8 GB ✅ (예상 ~4.8 GB)
 - [ ] Prepare Custom LLM API spec (needed for Step 08e)
@@ -258,29 +258,27 @@ CUSTOM_LLM_MODEL=your-model-name
     all event handlers, 2-stage timeout messages, goodbye intent, graceful shutdown
   - `pytest tests/test_main.py` (integration, mocked components)
 
+### Deployment layer
+
+- [ ] **Step 12** — systemd 서비스 배포
+  - `yona.service` unit file 작성 → `/etc/systemd/system/yona.service`
+  - `Restart=on-failure` + `RestartSec=3` (비정상 종료 시 자동 재시작)
+  - `WantedBy=multi-user.target` (Jetson 부팅 시 자동 시작)
+  - `EnvironmentFile=` 로 `.env` 로드 (API 키 등)
+  - 오디오 그룹 권한 + USB 디바이스 접근 확인
+  - `journalctl -u yona` 로그 연동
+  - `systemctl enable|start|stop|status yona` 운영 매뉴얼
+
 ---
 
 ## V3 Roadmap (Post-v2 Features)
-
-### PTT (Push-to-Talk) via Poly Sync 20 Call Button
-
-**배경:** Poly Sync 20 Plus의 통화 버튼(Call/Answer-End)은 USB HID telephony 이벤트를 발생시킨다.
-Linux에서 `evdev` 또는 `hidraw`로 캡처 가능하며, wake word 없이 즉시 LISTENING으로 진입하는
-PTT 모드를 구현할 수 있다.
-
-**구현 계획:**
-- `evdev` 또는 `python-hid` 로 `/dev/hidrawX` 이벤트 감지
-- Call 버튼 단일 클릭 → IDLE이면 LISTENING 진입 (wake word 대체)
-- Call 버튼 단일 클릭 → LISTENING/SPEAKING이면 IDLE 복귀 (강제 종료)
-- `src/wake.py`에 `PttDetector` 클래스 추가 또는 별도 `src/ptt.py`로 분리
-- `YonaApp`에서 openWakeWord와 PTT를 병렬 실행
-
-**HID 디바이스 정보:**
-- VID: `047f` (Plantronics/Poly), PID: 기기별 상이 (`lsusb`로 확인)
-- HID Usage Page: Telephony (0x0B), Usage: Hook Switch / Phone Mute
-- Linux: `/dev/hidraw*` 또는 `evdev` KEY_PHONE / KEY_MUTE 이벤트
-
-**참고:** Poly Sync 20 User Guide (2026, HP) 및 Linux hid-plantronics 드라이버 확인 완료
+- Tool calling or MCP
+  - MongoDB MCP
+    . Data query, Simple Statistics 
+  - file i/o mcp
+    . search/find a file
+    . read/write file
+    . etc 
 
 ---
 
@@ -295,5 +293,5 @@ PTT 모드를 구현할 수 있다.
 | Phrase split | Regex boundary detection | No LLM dependency, fast |
 | Barge-in | `asyncio.Event` + `task.cancel()` | Clean cancellation propagation |
 | TTS sample rate | 24 000 Hz (MeloTTS native) | Passed to `AudioManager.play_audio(sr=...)` |
-| History store | JSON files `data/history/` | No DB, simple, weekly granularity |
-| Chime | Programmatic sine wave | No external file dependency |
+| History store | JSON files `data/history/`  | DB (Optional), simple, weekly granularity |
+| Chime | Programmatic sine wave | external file if exists |

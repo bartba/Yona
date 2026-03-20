@@ -89,7 +89,7 @@ SPEAKING ──(playback done)──→ LISTENING
 SPEAKING ──(barge-in VAD)──→ LISTENING
 LISTENING/SPEAKING ──(15 s)──→ TIMEOUT_CHECK
 TIMEOUT_CHECK ──(speech)──→ LISTENING
-TIMEOUT_CHECK ──(15 s more)──→ TIMEOUT_FINAL → IDLE
+TIMEOUT_CHECK ──(5 s more)───→ TIMEOUT_FINAL → IDLE
 any state ──(goodbye intent)──→ IDLE
 ```
 

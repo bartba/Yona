@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -84,6 +84,28 @@ class TestMeloSynthesizer:
     def test_init_creates_tts_engine(self, tmp_path, mock_melo_engine):
         MeloSynthesizer(_cfg(tmp_path))
         _melo_api_stub.TTS.assert_called_with(language="KR", device="cpu")
+
+    def test_init_with_cuda_device(self, tmp_path, mock_melo_engine):
+        cfg = _cfg(tmp_path, 'tts:\n  melo_device: "cuda"\n  melo_language: "KR"\n  output_sample_rate: 24000')
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = True
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            MeloSynthesizer(cfg)
+        _melo_api_stub.TTS.assert_called_with(language="KR", device="cuda")
+
+    def test_init_cuda_fallback_to_cpu(self, tmp_path, mock_melo_engine):
+        cfg = _cfg(tmp_path, 'tts:\n  melo_device: "cuda"\n  melo_language: "KR"\n  output_sample_rate: 24000')
+        mock_torch = MagicMock()
+        mock_torch.cuda.is_available.return_value = False
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            synth = MeloSynthesizer(cfg)
+        _melo_api_stub.TTS.assert_called_with(language="KR", device="cpu")
+        assert synth._device == "cpu"
+
+    def test_init_invalid_device_raises(self, tmp_path, mock_melo_engine):
+        cfg = _cfg(tmp_path, 'tts:\n  melo_device: "tpu"\n  melo_language: "KR"\n  output_sample_rate: 24000')
+        with pytest.raises(ValueError, match="Invalid tts.melo_device"):
+            MeloSynthesizer(cfg)
 
     def test_init_picks_first_speaker_id(self, tmp_path, mock_melo_engine):
         mock_melo_engine.hps.data.spk2id = {"KR": 42, "EN": 7}
