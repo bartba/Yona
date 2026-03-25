@@ -1,1 +1,1 @@
-"""Yona Voice Chat Application."""
+"""Voice Chat Application."""

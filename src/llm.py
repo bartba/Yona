@@ -276,7 +276,9 @@ class OpenAIChatHandler:
         """Yield response tokens from OpenAI chat completions (streaming)."""
         await self._bus.publish(EventType.LLM_RESPONSE_STARTED)
         logger.debug("OpenAI stream start | model=%s", self._model)
-
+        
+        # response는 전체 텍스트가 아니라 AsyncIterator (토큰이 생성될 때마다 하나씩 도착하는 스트림)
+        # 이 await 는 첫번째 토큰이 도착하기 전에 HTTP 연결만 맺고 바로 리턴한다.
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=context.get_messages(),  # type: ignore[arg-type]
@@ -285,11 +287,12 @@ class OpenAIChatHandler:
             stream=True,
         )
 
-        async for chunk in response:
-            token: str = chunk.choices[0].delta.content or ""
+        # OpenAI 서버에서 토큰이 하나 생성될 때 마다 chunk 객체가 도착한다. 
+        async for chunk in response: 
+            token: str = chunk.choices[0].delta.content or ""  # None 이 오는 경우 빈문자열 처리
             if token:
                 await self._bus.publish(EventType.LLM_RESPONSE_CHUNK, data=token)
-                yield token
+                yield token         # 이 토큰을 호출자(_llm_worker 의 async for 에 전달한다.). 여기서 함수가 일시정지 되고, 다음 토큰이 오면 다시 재개
 
         await self._bus.publish(EventType.LLM_RESPONSE_DONE)
         logger.debug("OpenAI stream done")
@@ -401,9 +404,7 @@ class CustomLLMChatHandler:
 
         # Gauss API expects a flat list of user/assistant strings (no role dicts)
         contents = [
-            m["content"]
-            for m in context.get_messages()
-            if m["role"] != "system"
+            m["content"] for m in context.get_messages() if m["role"] != "system"
         ]
 
         payload = {
@@ -464,7 +465,7 @@ def create_chat_handler(cfg: Config, bus: EventBus) -> ChatHandler:
     Raises:
         ValueError: If the provider name is not recognised.
     """
-    provider: str = (cfg.get("llm.provider", "openai") or "openai").lower().strip()
+    provider: str = (cfg.get("llm.provider", "custom") or "custom").lower().strip()
 
     if provider == "openai":
         logger.info("LLM provider: OpenAI (model=%s)", cfg.get("llm.openai_model", "?"))

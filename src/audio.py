@@ -36,7 +36,9 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+import subprocess
 import threading
 from typing import Callable
 
@@ -175,6 +177,8 @@ class AudioManager:
         self._output_channels: int = cfg.get("audio.output_channels", 2)
         self._chunk_size: int = cfg.get("audio.chunk_size", 512)
 
+        self._volume_percent: int | None = cfg.get("audio.volume_percent", None)
+
         self._callbacks: list[Callable[[np.ndarray], None]] = []
         self._cb_lock = threading.Lock()
         self._input_stream: sd.InputStream | None = None
@@ -226,8 +230,48 @@ class AudioManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _apply_volume(self) -> None:
+        """Set ALSA PCM playback volume for the output device if configured.
+
+        Uses ``amixer`` to find the correct ALSA card number by matching the
+        output device name, then sets numid=5 (PCM Playback Volume).
+        Logs a warning and continues silently on failure.
+        """
+        if self._volume_percent is None:
+            return
+
+        log = logging.getLogger(__name__)
+
+        # Find ALSA card number from sounddevice device info
+        card_num: int | None = None
+        for dev_info in sd.query_devices():
+            if self._output_device in dev_info["name"]:
+                # Extract hw:N from device name, e.g. "Poly Sync 20: USB Audio (hw:1,0)"
+                name: str = dev_info["name"]
+                if "hw:" in name:
+                    hw_part = name.split("hw:")[1].split(",")[0].rstrip(")")
+                    card_num = int(hw_part)
+                break
+
+        if card_num is None:
+            log.warning("Cannot find ALSA card for '%s'; skipping volume set", self._output_device)
+            return
+
+        # Convert percent (0-100) → ALSA value (0-20)
+        alsa_val = max(0, min(20, round(self._volume_percent * 20 / 100)))
+        try:
+            subprocess.run(
+                ["amixer", "-c", str(card_num), "cset", "numid=5", str(alsa_val)],
+                capture_output=True, text=True, timeout=5, check=True,
+            )
+            log.info("ALSA volume set to %d/20 (%d%%) on card %d",
+                     alsa_val, self._volume_percent, card_num)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            log.warning("Failed to set ALSA volume: %s", exc)
+
     async def start(self) -> None:
         """Open and start the microphone input stream."""
+        self._apply_volume()
         self._input_stream = sd.InputStream(
             device=self._input_device,
             channels=self._input_channels,

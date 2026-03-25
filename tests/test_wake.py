@@ -185,66 +185,67 @@ class TestWakeWordDetectorProcessChunk:
         pcm = handle.predict.call_args[0][0]
         assert np.all(pcm == 32767)
 
-    def test_predict_passes_threshold_dict(self, detector, mock_oww):
+    def test_predict_called_without_threshold_patience(self, detector, mock_oww):
+        """predict() is called with raw audio only — no threshold/patience kwargs."""
         handle, _ = mock_oww
         detector.process_chunk(_silence())
         kwargs = handle.predict.call_args[1]
-        assert kwargs["threshold"] == {"hi_inspector": 0.5}
-
-    def test_predict_passes_patience_dict(self, detector, mock_oww):
-        handle, _ = mock_oww
-        detector.process_chunk(_silence())
-        kwargs = handle.predict.call_args[1]
-        assert kwargs["patience"] == {"hi_inspector": 3}
+        assert "threshold" not in kwargs
+        assert "patience" not in kwargs
 
 
 # ---------------------------------------------------------------------------
-# TestWakeWordDetectorDetection
+# TestWakeWordDetectorDetection (patience-based)
 # ---------------------------------------------------------------------------
 
 class TestWakeWordDetectorDetection:
-    def test_publishes_wake_word_detected(self, detector, bus, mock_oww):
+    def _feed_n(self, detector, handle, score: float, n: int, t: float) -> None:
+        """Feed n chunks with the given score at monotonic time t."""
+        handle.predict.return_value = {"hi_inspector": score}
+        with patch("src.wake.time.monotonic", return_value=t):
+            for _ in range(n):
+                detector.process_chunk(_silence())
+
+    def test_no_event_before_patience_reached(self, detector, bus, mock_oww):
+        """2 frames above threshold (patience=3) should not trigger."""
         handle, _ = mock_oww
-        handle.predict.return_value = {"hi_inspector": 0.8}
-        with patch("src.wake.time.monotonic", return_value=100.0):
-            detector.process_chunk(_silence())
+        self._feed_n(detector, handle, 0.8, 2, 100.0)
+        bus.publish_nowait.assert_not_called()
+
+    def test_publishes_after_patience_reached(self, detector, bus, mock_oww):
+        """3 consecutive frames above threshold should trigger."""
+        handle, _ = mock_oww
+        self._feed_n(detector, handle, 0.8, 3, 100.0)
         bus.publish_nowait.assert_called_once_with(
             EventType.WAKE_WORD_DETECTED, data="hi_inspector"
         )
 
-    def test_publishes_correct_model_name(self, detector, bus, mock_oww):
+    def test_patience_resets_on_below_threshold(self, detector, bus, mock_oww):
+        """If score drops below threshold, patience counter resets."""
         handle, _ = mock_oww
-        handle.models = {"hi_inspector": MagicMock(), "hey_jarvis": MagicMock()}
-        handle.predict.return_value = {"hi_inspector": 0.1, "hey_jarvis": 0.9}
-        with patch("src.wake.time.monotonic", return_value=100.0):
-            detector.process_chunk(_silence())
-        bus.publish_nowait.assert_called_once_with(
-            EventType.WAKE_WORD_DETECTED, data="hey_jarvis"
-        )
+        self._feed_n(detector, handle, 0.8, 2, 100.0)  # 2 above
+        self._feed_n(detector, handle, 0.3, 1, 100.0)   # 1 below — resets
+        self._feed_n(detector, handle, 0.8, 2, 100.0)  # 2 above again
+        bus.publish_nowait.assert_not_called()           # still only 2, not 3
 
     def test_no_event_when_below_threshold(self, detector, bus, mock_oww):
         handle, _ = mock_oww
-        handle.predict.return_value = {"hi_inspector": 0.3}
-        detector.process_chunk(_silence())
+        self._feed_n(detector, handle, 0.3, 10, 100.0)
         bus.publish_nowait.assert_not_called()
 
     def test_no_event_when_score_is_zero(self, detector, bus, mock_oww):
         handle, _ = mock_oww
-        handle.predict.return_value = {"hi_inspector": 0.0}
-        detector.process_chunk(_silence())
+        self._feed_n(detector, handle, 0.0, 10, 100.0)
         bus.publish_nowait.assert_not_called()
 
     def test_updates_last_trigger_on_detection(self, detector, mock_oww):
         handle, _ = mock_oww
-        handle.predict.return_value = {"hi_inspector": 0.8}
-        with patch("src.wake.time.monotonic", return_value=42.0):
-            detector.process_chunk(_silence())
+        self._feed_n(detector, handle, 0.8, 3, 42.0)
         assert detector._last_trigger == 42.0
 
     def test_last_trigger_unchanged_when_below_threshold(self, detector, mock_oww):
         handle, _ = mock_oww
-        handle.predict.return_value = {"hi_inspector": 0.3}
-        detector.process_chunk(_silence())
+        self._feed_n(detector, handle, 0.3, 5, 100.0)
         assert detector._last_trigger == 0.0
 
 
@@ -254,9 +255,11 @@ class TestWakeWordDetectorDetection:
 
 class TestWakeWordDetectorCooldown:
     def _trigger_at(self, detector, handle, t: float) -> None:
+        """Simulate patience-met detection at time t."""
         handle.predict.return_value = {"hi_inspector": 0.8}
         with patch("src.wake.time.monotonic", return_value=t):
-            detector.process_chunk(_silence())
+            for _ in range(3):  # patience=3
+                detector.process_chunk(_silence())
 
     def test_second_trigger_within_cooldown_suppressed(self, detector, bus, mock_oww):
         handle, _ = mock_oww
@@ -278,9 +281,7 @@ class TestWakeWordDetectorCooldown:
         """Trigger at t=cooldown should be accepted (>= check)."""
         handle, _ = mock_oww
         detector._last_trigger = 10.0
-        handle.predict.return_value = {"hi_inspector": 0.8}
-        with patch("src.wake.time.monotonic", return_value=12.0):  # 12-10=2 == cooldown
-            detector.process_chunk(_silence())
+        self._trigger_at(detector, handle, 12.0)  # 12-10=2 == cooldown
         bus.publish_nowait.assert_called_once()
 
     def test_cooldown_does_not_affect_return_value(self, detector, mock_oww):
@@ -288,7 +289,8 @@ class TestWakeWordDetectorCooldown:
         handle, _ = mock_oww
         handle.predict.return_value = {"hi_inspector": 0.8}
         with patch("src.wake.time.monotonic", return_value=0.0):
-            detector.process_chunk(_silence())   # first — sets last_trigger=0
+            for _ in range(3):
+                detector.process_chunk(_silence())  # triggers at t=0
         with patch("src.wake.time.monotonic", return_value=0.5):
             result = detector.process_chunk(_silence())  # within cooldown
         assert result == {"hi_inspector": 0.8}
@@ -303,3 +305,12 @@ class TestWakeWordDetectorReset:
         handle, _ = mock_oww
         detector.reset()
         handle.reset.assert_called_once()
+
+    def test_reset_clears_patience_counters(self, detector, mock_oww):
+        handle, _ = mock_oww
+        handle.predict.return_value = {"hi_inspector": 0.8}
+        with patch("src.wake.time.monotonic", return_value=100.0):
+            detector.process_chunk(_silence())  # patience_count = 1
+            detector.process_chunk(_silence())  # patience_count = 2
+        detector.reset()
+        assert detector._patience_count == {}

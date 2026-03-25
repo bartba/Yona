@@ -221,7 +221,10 @@ class YonaApp:
             lang = self._stt.detected_language or "ko"
 
             if not text:
-                logger.info("Empty transcription — back to LISTENING")
+                logger.info("Empty transcription — notify and back to LISTENING")
+                msgs = self._cfg.get("conversation.empty_transcription_message", {})
+                msg = msgs.get(lang, msgs.get("ko", "잘 못 들었어요."))
+                await self._play_tts(msg)
                 await self._sm.transition(CS.LISTENING)
                 self._restart_timeout()
                 return

@@ -29,6 +29,7 @@ Usage::
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 
 import numpy as np
 from openwakeword.model import Model as OwwModel
@@ -45,6 +46,9 @@ class WakeWordDetector:
     *patience* consecutive frames, publishes
     :data:`EventType.WAKE_WORD_DETECTED` with the model name as *data*,
     then enforces a cooldown period to suppress immediate re-triggers.
+
+    Patience and threshold are applied manually (not via openWakeWord's
+    predict() parameters) for consistent behaviour across library versions.
 
     This class is designed to be registered as an ``AudioManager`` input
     callback.  :meth:`process_chunk` is sync and uses ``publish_nowait``
@@ -65,12 +69,15 @@ class WakeWordDetector:
         self._cooldown: float = cfg.get("wake_word.cooldown_seconds", 2.0)
         self._active_models: set[str] = set(cfg.get("wake_word.active_models", []))
 
-        self._model = OwwModel(
-            wakeword_models=model_paths,
-            inference_framework=framework,
-        )
+        # Empty model_paths → load all pretrained models (openWakeWord default)
+        kwargs: dict[str, object] = {"inference_framework": framework}
+        if model_paths:
+            kwargs["wakeword_models"] = model_paths
+        self._model = OwwModel(**kwargs)  # type: ignore[arg-type]
 
         self._last_trigger: float = 0.0  # monotonic time of the last detection
+        # Patience counter: consecutive frames above threshold per model
+        self._patience_count: dict[str, int] = defaultdict(int)
 
     # ------------------------------------------------------------------
     # Properties
@@ -90,34 +97,40 @@ class WakeWordDetector:
 
         Converts *chunk* from float32 to int16, feeds it to openWakeWord,
         and publishes an event if any model score exceeds the threshold
-        (with patience) and the cooldown has elapsed.
+        for *patience* consecutive frames and the cooldown has elapsed.
 
         Args:
             chunk: Mono float32 array (any length; internally buffered).
 
         Returns:
-            Dict mapping model name to prediction score (0.0–1.0).
+            Dict mapping model name to raw prediction score (0.0-1.0).
         """
         audio = np.asarray(chunk, dtype=np.float32).ravel()
 
         # float32 [-1, 1] → int16 [-32768, 32767]
         pcm = (audio * 32767.0).clip(-32768, 32767).astype(np.int16)
 
-        # Run prediction with patience-based detection
-        result = self._model.predict(
-            pcm,
-            threshold={name: self._threshold for name in self._model.models},
-            patience={name: self._patience for name in self._model.models},
-        )
-        predictions: dict[str, float] = dict(result)  # type: ignore[arg-type]
+        # Run prediction — raw scores only, no patience/threshold args
+        result = self._model.predict(pcm)
+        predictions: dict[str, float] = {}
+        if isinstance(result, dict):
+            predictions = {k: float(v) for k, v in result.items()}
 
-        # Check for detections (only active models)
+        # Manual patience + threshold + cooldown logic
         now = time.monotonic()
         for name, score in predictions.items():
             if self._active_models and name not in self._active_models:
                 continue
-            if score >= self._threshold and now - self._last_trigger >= self._cooldown:
+
+            if score >= self._threshold:
+                self._patience_count[name] += 1
+            else:
+                self._patience_count[name] = 0
+
+            if (self._patience_count[name] >= self._patience
+                    and now - self._last_trigger >= self._cooldown):
                 self._last_trigger = now
+                self._patience_count[name] = 0
                 self._bus.publish_nowait(EventType.WAKE_WORD_DETECTED, data=name)
                 break  # one detection per chunk is enough
 
@@ -134,3 +147,4 @@ class WakeWordDetector:
         to clear accumulated state.
         """
         self._model.reset()
+        self._patience_count.clear()

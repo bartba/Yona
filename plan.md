@@ -15,7 +15,7 @@ src/
 ├── events.py      # EventType enum + EventBus
 ├── state.py       # ConversationState + StateMachine
 ├── audio.py       # AudioManager + AudioBuffer + ChimePlayer
-├── vad.py         # VoiceActivityDetector (Silero ONNX)
+├── vad.py         # VoiceActivityDetector (Silero VAD v6 ONNX)
 ├── wake.py        # WakeWordDetector (openWakeWord, ONNX)
 ├── stt.py         # Transcriber (faster-whisper large-v3-turbo)
 ├── llm.py         # ChatHandler + Context + History + OpenAI + Custom + factory
@@ -30,7 +30,7 @@ src/
 
 | Feature | Implementation |
 |---------|----------------|
-| Wake word | openWakeWord (ONNX, offline): "Hi Inspector" |
+| Wake word | openWakeWord (ONNX, offline): configurable via `wake_word.wake_phrase` (custom model TBD) |
 | Wake word notify | Chime sound on detection |
 | STT | faster-whisper large-v3-turbo, CUDA |
 | LLM | OpenAI GPT **or** Claude **or** Custom LLM (selectable) |
@@ -140,7 +140,7 @@ CUSTOM_LLM_MODEL=your-model-name
 
 ## Pre-flight Checklist
 
-- [x] Train "Hi Inspector" custom wake word model → `hi_inspector.onnx` (openWakeWord)
+- [ ] Train custom wake word model → `.onnx` (openWakeWord) — currently using pretrained "alexa" for testing
 - [ ] Download MeloTTS Korean model (pip install 시 자동)
 - [ ] Verify GPU memory: large-v3-turbo (~1.5 GB) + TTS CPU mode on Jetson 8 GB ✅ (예상 ~4.8 GB)
 - [ ] Prepare Custom LLM API spec (needed for Step 08e)
@@ -172,7 +172,8 @@ CUSTOM_LLM_MODEL=your-model-name
   - `pytest tests/test_audio.py`
 
 - [x] **Step 05** — `src/vad.py`
-  - `VoiceActivityDetector` — Silero ONNX, 512-sample windows, LSTM state
+  - `VoiceActivityDetector` — Silero VAD v6 ONNX, 512-sample chunks + 64-sample context window, single `state` tensor
+  - v5→v6 업그레이드 (노이즈 환경 16% 오류 감소, drop-in 교체)
   - `pytest tests/test_vad.py`
 
 ### Recognition layer

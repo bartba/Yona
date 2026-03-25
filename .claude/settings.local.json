@@ -4,7 +4,12 @@
       "Bash(wc:*)",
       "WebFetch(domain:github.com)",
       "WebSearch",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(ls -la /home/bart/workspace/code/Yona/tests/test_*.py)",
+      "Bash(python -m pytest tests/ --collect-only -q)",
+      "Bash(ls -lh /home/bart/workspace/code/Yona/src/*.py)",
+      "Read(//home/bart/workspace/code/Yona/**)"
     ]
   }
 }

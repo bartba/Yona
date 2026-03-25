@@ -11,12 +11,14 @@ audio:
   chunk_size: 512                  # samples/callback = 32 ms @ 16 kHz; matches Porcupine frame_length
   buffer_seconds: 30               # ring-buffer = ~1.9 MB; holds the longest expected utterance
   chime_path: "sound/mixkit-magic-marimba-2820.wav"  # path to chime.wav; null = generate programmatically
+  volume_percent: 65                # ALSA PCM playback volume (0-100%); null = don't touch
 
 wake_word:
+  wake_phrase: "Hey Mack"              # display phrase (what the user says); used in logs and test prompts
   model_paths:
-    - "models/wake_word/hey_jarvis_v0.1.onnx"   # pretrained; replace with hi_inspector.onnx after custom training
+    - "models/wake_word/Hey_Mack_20260309_205536.onnx"
   active_models:
-    - "hey_jarvis"
+    - "Hey_Mack_20260309_205536"       # custom model; key = filename without .onnx
   inference_framework: "onnx"        # "onnx" or "tflite"
   threshold: 0.5                     # score cutoff for detection (0.0-1.0)
   patience: 3                        # consecutive frames above threshold to trigger
@@ -80,6 +82,9 @@ conversation:
   timeout_final_message:
     ko: "대화를 종료합니다. 필요하시면 다시 불러주세요."
     en: "Ending our conversation. Call me anytime!"
+  empty_transcription_message:
+    ko: "잘 못 들었어요. 다시 말씀해 주세요."
+    en: "Sorry, I didn't catch that. Could you say it again?"
   goodbye_message:
     ko: "네, 대화를 마치겠습니다. 안녕히 계세요!"
     en: "Goodbye! Have a great day!"

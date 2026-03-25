@@ -26,10 +26,12 @@ from src.vad import VoiceActivityDetector
 # ---------------------------------------------------------------------------
 
 def _make_ort_result(prob: float) -> list:
-    """Return a fake ort.InferenceSession.run() result for *prob*."""
+    """Return a fake ort.InferenceSession.run() result for *prob*.
+
+    Silero VAD returns [output, stateN] — a single state tensor.
+    """
     return [
         np.array([[prob]], dtype=np.float32),
-        np.zeros((2, 1, 128), dtype=np.float32),
         np.zeros((2, 1, 128), dtype=np.float32),
     ]
 
@@ -111,17 +113,16 @@ class TestVADInit:
     def test_reads_chunk_size(self, vad):
         assert vad._chunk_size == 512
 
-    def test_initial_lstm_h_shape(self, vad):
-        assert vad._h.shape == (2, 1, 128)
-        assert vad._h.dtype == np.float32
-
-    def test_initial_lstm_c_shape(self, vad):
-        assert vad._c.shape == (2, 1, 128)
-        assert vad._c.dtype == np.float32
+    def test_initial_lstm_state_shape(self, vad):
+        assert vad._state.shape == (2, 1, 128)
+        assert vad._state.dtype == np.float32
 
     def test_initial_lstm_state_is_zeros(self, vad):
-        np.testing.assert_array_equal(vad._h, np.zeros((2, 1, 128)))
-        np.testing.assert_array_equal(vad._c, np.zeros((2, 1, 128)))
+        np.testing.assert_array_equal(vad._state, np.zeros((2, 1, 128)))
+
+    def test_initial_context_is_zeros(self, vad):
+        assert len(vad._context) == 64
+        np.testing.assert_array_equal(vad._context, np.zeros(64, dtype=np.float32))
 
     def test_initial_speech_not_active(self, vad):
         assert vad._speech_active is False
@@ -156,7 +157,8 @@ class TestVADProcessChunk:
         session, _ = mock_session
         vad.process_chunk(_silence())
         ort_inputs = session.run.call_args[0][1]
-        assert ort_inputs["input"].shape == (1, 512)
+        # 64 context + 512 chunk = 576
+        assert ort_inputs["input"].shape == (1, 576)
 
     def test_input_tensor_dtype(self, vad, mock_session):
         session, _ = mock_session
@@ -176,43 +178,40 @@ class TestVADProcessChunk:
         short = np.zeros(256, dtype=np.float32)
         vad.process_chunk(short)
         ort_inputs = session.run.call_args[0][1]
-        assert ort_inputs["input"].shape == (1, 512)
+        # 64 context + 512 (padded) = 576
+        assert ort_inputs["input"].shape == (1, 576)
 
     def test_long_chunk_truncated_to_chunk_size(self, vad, mock_session):
         session, _ = mock_session
         long_chunk = np.zeros(1024, dtype=np.float32)
         vad.process_chunk(long_chunk)
         ort_inputs = session.run.call_args[0][1]
-        assert ort_inputs["input"].shape == (1, 512)
+        # 64 context + 512 (truncated) = 576
+        assert ort_inputs["input"].shape == (1, 576)
 
     def test_lstm_state_updated_after_call(self, vad, mock_session):
         session, _ = mock_session
-        new_h = np.ones((2, 1, 128), dtype=np.float32) * 0.5
-        new_c = np.ones((2, 1, 128), dtype=np.float32) * 0.3
+        new_state = np.ones((2, 1, 128), dtype=np.float32) * 0.5
         session.run.return_value = [
             np.array([[0.0]], dtype=np.float32),
-            new_h,
-            new_c,
+            new_state,
         ]
         vad.process_chunk(_silence())
-        np.testing.assert_array_equal(vad._h, new_h)
-        np.testing.assert_array_equal(vad._c, new_c)
+        np.testing.assert_array_equal(vad._state, new_state)
 
     def test_previous_lstm_state_passed_to_next_call(self, vad, mock_session):
         """LSTM state from first call must be fed into the second call."""
         session, _ = mock_session
-        updated_h = np.full((2, 1, 128), 0.9, dtype=np.float32)
-        updated_c = np.full((2, 1, 128), 0.8, dtype=np.float32)
+        updated_state = np.full((2, 1, 128), 0.9, dtype=np.float32)
         session.run.side_effect = [
-            [np.array([[0.0]], dtype=np.float32), updated_h, updated_c],
-            [np.array([[0.0]], dtype=np.float32), updated_h, updated_c],
+            [np.array([[0.0]], dtype=np.float32), updated_state],
+            [np.array([[0.0]], dtype=np.float32), updated_state],
         ]
         vad.process_chunk(_silence())
         vad.process_chunk(_silence())
 
         second_inputs = session.run.call_args_list[1][0][1]
-        np.testing.assert_array_equal(second_inputs["h"], updated_h)
-        np.testing.assert_array_equal(second_inputs["c"], updated_c)
+        np.testing.assert_array_equal(second_inputs["state"], updated_state)
 
 
 # ---------------------------------------------------------------------------
@@ -339,29 +338,23 @@ class TestVADBargeIn:
 # ---------------------------------------------------------------------------
 
 class TestVADReset:
-    def test_reset_clears_lstm_h(self, vad, mock_session):
+    def test_reset_clears_lstm_state(self, vad, mock_session):
         session, _ = mock_session
         session.run.return_value = [
             np.array([[0.0]], dtype=np.float32),
-            np.ones((2, 1, 128), dtype=np.float32),
             np.ones((2, 1, 128), dtype=np.float32),
         ]
         with patch("src.vad.time.monotonic", return_value=0.0):
             vad.process_chunk(_silence())
         vad.reset()
-        np.testing.assert_array_equal(vad._h, np.zeros((2, 1, 128)))
+        np.testing.assert_array_equal(vad._state, np.zeros((2, 1, 128)))
 
-    def test_reset_clears_lstm_c(self, vad, mock_session):
+    def test_reset_clears_context(self, vad, mock_session):
         session, _ = mock_session
-        session.run.return_value = [
-            np.array([[0.0]], dtype=np.float32),
-            np.ones((2, 1, 128), dtype=np.float32),
-            np.ones((2, 1, 128), dtype=np.float32),
-        ]
         with patch("src.vad.time.monotonic", return_value=0.0):
-            vad.process_chunk(_silence())
+            vad.process_chunk(np.ones(512, dtype=np.float32))
         vad.reset()
-        np.testing.assert_array_equal(vad._c, np.zeros((2, 1, 128)))
+        np.testing.assert_array_equal(vad._context, np.zeros(64, dtype=np.float32))
 
     def test_reset_clears_speech_active(self, vad, mock_session):
         session, _ = mock_session

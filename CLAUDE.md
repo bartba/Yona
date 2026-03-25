@@ -10,11 +10,11 @@ See **`plan.md`** in the project root for the full step-by-step build plan and p
 Start each new session with: *"plan.md의 Step N을 진행합시다"*
 
 ## Tech Stack
-- **Wake Word**: openWakeWord (ONNX, fully offline) — "Hi Inspector"
+- **Wake Word**: openWakeWord (ONNX, fully offline) — configurable via `wake_word.wake_phrase` (currently "Alexa" for testing; custom model TBD)
 - **STT**: faster-whisper `large-v3-turbo`, CUDA float16
 - **LLM**: OpenAI GPT **or** Claude (Anthropic) **or** Custom company LLM (selectable via `LLM_PROVIDER` env var)
 - **TTS**: MeloTTS (default, Korean+English) **or** Kokoro TTS (English only, no Korean voice in v1.0) — CPU mode, 24 kHz, `tts.provider` config
-- **VAD**: Silero VAD (ONNX), used for both speech detection and barge-in monitoring
+- **VAD**: Silero VAD v6 (ONNX), 512-sample chunks + 64-sample context window, used for both speech detection and barge-in monitoring
 - **Audio**: sounddevice + numpy — 16 kHz input / 48 kHz output
 
 ## Project Structure (v2 — flat)
@@ -24,7 +24,7 @@ src/
 ├── events.py      # EventType enum + async EventBus
 ├── state.py       # ConversationState + StateMachine (6 states)
 ├── audio.py       # AudioManager + AudioBuffer + ChimePlayer
-├── vad.py         # VoiceActivityDetector (Silero ONNX)
+├── vad.py         # VoiceActivityDetector (Silero VAD v6 ONNX)
 ├── wake.py        # WakeWordDetector (openWakeWord, ONNX)
 ├── stt.py         # Transcriber (faster-whisper)
 ├── llm.py         # ChatHandler Protocol + Context + History + providers + factory
