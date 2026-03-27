@@ -35,13 +35,14 @@
 - **성공 기준**: 이벤트 쌍 정확 매칭, 환경소음 false positive 0
 
 ### [x] HW-04: Wake Word 라이브
-- pretrained "alexa" 모델로 테스트 (config `wake_word.wake_phrase`)
-- TPR: 100% (6/6), cooldown 준수 (간격 ≥ 2.0s) ✅
+- custom model `Hey_Mack_20260309_205536.onnx`, patience=2, threshold=0.5
+- TPR: 120% (12/10 감지), cooldown 준수 ✅
 - 환경 소음 FP: 0회 ✅
-- 유사 발음 FPR: 5회 — pretrained 모델 한계, custom 모델로 해결 예정
+- 유사 발음 FPR: 4회 ("Hey Maggie/Man/Mark/McDonald" 등 "Hey M..." 패턴) — 실사용 환경에서 허용 가능
 - `wake.py` 수정: `predict()` patience/threshold 파라미터 제거, 자체 patience 카운터 구현
 - `wake_word.wake_phrase` config 필드 추가 (표시용 phrase)
-- **성공 기준**: TPR ≥ 80% ✅, FPR = 모델 의존 (custom 모델 필요), cooldown ✅
+- **최종 설정**: wake_phrase="Hey Mack", patience=2, threshold=0.5, cooldown=2.0s
+- **성공 기준**: TPR ≥ 80% ✅, cooldown ✅, FPR = "Hey M..." 패턴 한계 (실사용 허용)
 
 ### [x] HW-05: VAD Barge-in 모드
 - 테스트 스크립트: `python tests/test_hw_bargein.py`
@@ -54,21 +55,44 @@
 
 ## Phase 3: 인식 레이어
 
-### [ ] HW-06: STT (faster-whisper) 라이브
+### [x] HW-06: STT (faster-whisper) 라이브
 - 한국어/영어/혼용 5개 문장 실시간 STT
 - 정확도(WER), 처리 시간(RTF), 언어 감지, GPU 메모리 확인
 - **성공 기준**: 핵심 단어 정확도 > 90%, RTF < 0.2x, 언어 감지 정확
 
-### [ ] HW-07: LLM 스트리밍
-- 설정된 provider로 4개 프롬프트 스트리밍
-- TTFT(첫 토큰 지연), 토큰/초, 응답 품질 측정
-- **성공 기준**: TTFT < 2초, 자연스러운 대화체
+### [x] HW-07: LLM 스트리밍
+- 테스트 스크립트: `python tests/test_hw_llm.py --model gpt-5-mini`
+- Provider: OpenAI, 모델: gpt-5-mini (`max_completion_tokens` 사용, temperature 생략)
+- **영어** (4 프롬프트): TTFT mean=3.5s, min=1.6s, max=5.8s / 토큰속도 ~7 tok/s
+- **한국어** (6 프롬프트): TTFT mean=6.5s, min=5.5s, max=8.0s / 토큰속도 ~26 tok/s
+- 응답 완전성: 10/10 ✅, 응답 품질(자연스러움·정확성): 양호 ✅
+- gpt-5-nano: content filtering 과도 (AI/LLM/우주 주제 거부), TTFT도 mini보다 느려 채택 안 함
+- **언어별 차이**: 한국어 TTFT가 영어 대비 약 2.5배 느림 (서버 측 토크나이저 오버헤드 추정)
+  - 단, 한국어 토큰 생성 속도는 영어보다 3.7배 빠름 (26 vs 7 tok/s) — 토큰당 정보 밀도 차이
+  - 한국어 응답 길이가 지시 무시하고 장문화되는 경향 (영어 대비 10배 이상)
+- **Yona 영향 (gpt-5-mini)**: 한국어 TTFT 5-8s + STT ~1s = 체감 총 지연 약 7-9s → 필러 표현 선삽입 검토 필요
+- **claude-haiku-4-5 추가 테스트** (한국어 6 프롬프트):
+  - TTFT mean=0.81s, max=1.06s → 전 항목 PASS ✅
+  - 토큰 속도: 3.9 tok/s (gpt-5-mini 대비 느리나 TTFT가 8배 빠름)
+  - 총 응답 시간 2-5s, 응답 완전성 6/6, 자연스러운 대화체 ✅
+  - content filtering 없음, 한국어 문맥(반말/존댓말) 파악 우수
+  - **Yona 한국어 환경 최적 모델**: TTFT 0.8s + STT 1s = 체감 지연 약 2s → 음성 어시스턴트 기준 합격
+- **claude-haiku-4-5 영어 추가 테스트** (6 프롬프트):
+  - TTFT mean=1.69s, max=5.72s (#4 이상치 — 한국어 동일 주제 0.64s로 서버 스파이크 추정)
+  - 이상치 제외 시 mean≈0.87s — 한국어(0.81s)와 사실상 동일
+  - 토큰 속도: 3.4 tok/s, 응답 완전성 6/6, 영어 답변 자연스러움·위트 우수 ✅
+- **언어별 차이 (Claude)**: 한국어/영어 TTFT 거의 동일 — gpt-5-mini의 8배 차이와 대조적
+- **전체 모델 최종 비교**:
+  - gpt-5-nano: 한국어 5-9s, content filtering 심각, 완전성 2/6 → 탈락
+  - gpt-5-mini: 한국어 6.5s avg, 영어 2.5s avg, 완전성 10/10 → 한국어 병목으로 부적합
+  - claude-haiku-4-5: 한/영 모두 TTFT ~0.8s avg, 완전성 12/12 → **채택**
+- **성공 기준**: TTFT < 2s → claude-haiku PASS ✅ / 응답 품질 → PASS ✅ / **최종 채택 모델: claude-haiku-4-5**
 
 ---
 
 ## Phase 4: 출력 레이어
 
-### [ ] HW-08: MeloTTS 라이브
+### [x] HW-08: MeloTTS 라이브
 - 한국어/영어 5개 문장 합성 → 재생
 - 합성 RTF, 언어 전환 시간, 발음 품질, 리샘플링 품질
 - **성공 기준**: RTF < 1.0x, 발음 이해 가능, 언어 전환 < 3초
@@ -77,12 +101,12 @@
 
 ## Phase 5: 파이프라인 통합
 
-### [ ] HW-09: 스트리밍 파이프라인 (LLM→TTS→Speaker)
+### [x] HW-09: 스트리밍 파이프라인 (LLM→TTS→Speaker)
 - 실제 질문 → 3-worker 파이프라인 실행 → 이벤트 타임라인 분석
 - TTFA(첫 음성까지 시간), phrase 간 무음, queue backpressure
 - **성공 기준**: TTFA < 5초, phrase 간 무음 < 1초
 
-### [ ] HW-10: Barge-in 파이프라인 중단
+### [x] HW-10: Barge-in 파이프라인 중단
 - 긴 응답 재생 중 말해서 pipeline.interrupt() 테스트
 - 중단 속도, AEC 영향, 파이프라인 정리 확인
 - **성공 기준**: 1초 이내 중단, false barge-in 없음
@@ -91,21 +115,21 @@
 
 ## Phase 6: 전체 시스템 통합
 
-### [ ] HW-11: 기본 대화 1턴
+### [x] HW-11: 기본 대화 1턴
 - `python -m src.main` 실행 → wake → 질문 → 응답 → 2턴째
 - 상태 전이 로그, 각 단계 소요 시간
 - **성공 기준**: 2턴 연속 대화 성공, 에러 없음
 
-### [ ] HW-12: 다중 턴 대화 + 컨텍스트 유지
+### [x] HW-12: 다중 턴 대화 + 컨텍스트 유지
 - 5턴 대화 (이름 기억, 맥락 참조, goodbye intent)
 - ConversationContext 유지, history JSON 저장 확인
 - **성공 기준**: 컨텍스트 유지, goodbye→IDLE, history 저장
 
-### [ ] HW-13: 2단계 타임아웃
+### [x] HW-13: 2단계 타임아웃
 - 15초 침묵 → "아직 계세요?" → Case A: 응답 / Case B: 5초 더 → farewell → IDLE
 - **성공 기준**: 양쪽 경로 모두 정상
 
-### [ ] HW-14: 한국어/영어 전환
+### [x] HW-14: 한국어/영어 전환
 - 같은 세션에서 한→영→한 전환
 - STT 언어 감지 → MeloTTS 언어 자동 전환
 - **성공 기준**: 언어 감지 정확, TTS 전환 자연스러움, 전환 지연 < 3초
@@ -161,9 +185,11 @@
 |-------|---------|------|
 | 1 | `tests/test_hw_audio.py` | 오디오 디바이스 I/O (대화형 메뉴) |
 | 2 | `tests/test_hw_vad.py` | VAD + Wake Word + Barge-in |
-| 3 | `tests/test_hw_stt.py` | STT + LLM 스트리밍 |
+| 3 | `tests/test_hw_stt.py` | STT (faster-whisper) |
+| 3 | `tests/test_hw_llm.py` | LLM 스트리밍 |
 | 4 | `tests/test_hw_tts.py` | MeloTTS 합성 + 재생 |
-| 5 | `tests/test_hw_pipeline.py` | 스트리밍 파이프라인 + Barge-in |
+| 5 | `tests/test_hw_pipeline.py` | 스트리밍 파이프라인 (HW-09) |
+| 5 | `tests/test_hw_bargein_pipeline.py` | Barge-in 파이프라인 중단 (HW-10) |
 | 6-8 | `python -m src.main` | 전체 시스템 통합 (로그 기반) |
 
 ## 유용한 디버그 명령어

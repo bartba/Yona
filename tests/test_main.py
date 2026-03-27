@@ -27,8 +27,6 @@ sys.modules.setdefault("faster_whisper", MagicMock())
 sys.modules.setdefault("openwakeword", MagicMock())
 sys.modules.setdefault("openwakeword.model", MagicMock())
 sys.modules.setdefault("onnxruntime", MagicMock())
-sys.modules.setdefault("melo", MagicMock())
-sys.modules.setdefault("melo.api", MagicMock())
 sys.modules.setdefault("openai", MagicMock())
 sys.modules.setdefault("anthropic", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
@@ -141,6 +139,7 @@ def app(cfg: Config) -> YonaApp:
     # Chime
     a._chime = MagicMock()
     a._chime.play = AsyncMock()
+    a._chime.play_processing = AsyncMock()
 
     # VAD
     a._vad = MagicMock()
@@ -185,9 +184,11 @@ class TestGoodbyeRegex:
     """Verify _GOODBYE_RE matches expected patterns."""
 
     @pytest.mark.parametrize("text", [
-        "안녕",
+        "안녕히 계세요",
+        "안녕히 가세요",
         "잘 가",
         "잘가",
+        "잘 있어",
         "종료",
         "그만",
         "바이바이",
@@ -203,17 +204,14 @@ class TestGoodbyeRegex:
         assert _GOODBYE_RE.search(text) is not None
 
     @pytest.mark.parametrize("text", [
-        "안녕하세요",  # greeting (contains 안녕) — will match by design
+        "안녕하세요",
+        "안녕",
         "hello",
         "how are you",
         "오늘 날씨 어때",
     ])
     def test_non_goodbye(self, text: str) -> None:
-        # "안녕하세요" contains "안녕" and will match — that's intended
-        if "안녕" in text:
-            assert _GOODBYE_RE.search(text) is not None
-        else:
-            assert _GOODBYE_RE.search(text) is None
+        assert _GOODBYE_RE.search(text) is None
 
 
 # ---------------------------------------------------------------------------
@@ -298,15 +296,16 @@ class TestOnSpeechStarted:
     """SPEECH_STARTED resets timeout or returns from TIMEOUT_CHECK."""
 
     @pytest.mark.asyncio
-    async def test_restarts_timeout_in_listening(self, app: YonaApp) -> None:
+    async def test_cancels_timeout_in_listening(self, app: YonaApp) -> None:
+        """SPEECH_STARTED cancels timeout (not restart) — prevents timeout during long speech."""
         app._sm._state = CS.LISTENING
         old_task = MagicMock()
         old_task.done.return_value = False
         app._timeout_task = old_task
         await app._on_speech_started(Event(type=EventType.SPEECH_STARTED))
         old_task.cancel.assert_called_once()
-        assert app._timeout_task is not None
-        app._cancel_timeout()
+        # Timeout should be cancelled, not restarted
+        assert app._timeout_task is None
 
     @pytest.mark.asyncio
     async def test_timeout_check_returns_to_listening(self, app: YonaApp) -> None:
@@ -316,7 +315,8 @@ class TestOnSpeechStarted:
         assert app._sm.state == CS.LISTENING
         app._audio.stop_playback.assert_awaited_once()
         app._buffer.reset.assert_called()
-        app._cancel_timeout()
+        # Timeout not restarted — resumes after _process_utterance
+        assert app._timeout_task is None
 
 
 class TestOnSpeechEnded:
@@ -329,6 +329,14 @@ class TestOnSpeechEnded:
         assert app._sm.state == CS.PROCESSING
         assert app._process_task is not None
         # Let the process task run
+        await asyncio.sleep(0.05)
+        app._cancel_timeout()
+
+    @pytest.mark.asyncio
+    async def test_plays_processing_chime(self, app: YonaApp) -> None:
+        app._sm._state = CS.LISTENING
+        await app._on_speech_ended(Event(type=EventType.SPEECH_ENDED))
+        app._chime.play_processing.assert_awaited_once()
         await asyncio.sleep(0.05)
         app._cancel_timeout()
 
@@ -694,3 +702,142 @@ class TestIntegrationFlow:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# Context compression tests
+# ---------------------------------------------------------------------------
+
+def _fill_context(ctx: ConversationContext, turns: int) -> None:
+    """Add *turns* user+assistant pairs to the context."""
+    for i in range(1, turns + 1):
+        ctx.add_user(f"사용자 메시지 {i}")
+        ctx.add_assistant(f"어시스턴트 응답 {i}")
+
+
+async def _mock_stream_summary(*_args, **_kwargs):
+    """Async generator that yields a fake summary."""
+    for token in ["대화", " 요약:", " 사용자가", " 여러", " 주제를", " 논의했습니다."]:
+        yield token
+
+
+class TestContextCompression:
+    """Verify conversation context compression via _compress_context."""
+
+    @pytest.mark.asyncio
+    async def test_compression_triggers_at_threshold(self, app: YonaApp):
+        """After 17 normal turns, turn 18 should trigger compression."""
+        _fill_context(app._context, 17)
+        assert app._context.message_count == 34
+        assert not app._context.needs_compression
+
+        # Turn 18 triggers compression
+        app._context.add_user("18번째 질문")
+        app._context.add_assistant("18번째 응답")
+        assert app._context.needs_compression
+
+    @pytest.mark.asyncio
+    async def test_compress_context_reduces_messages(self, app: YonaApp):
+        """_compress_context should halve the message count and store a summary."""
+        _fill_context(app._context, 18)
+        assert app._context.needs_compression
+
+        # Mock the LLM stream for summarisation
+        app._chat_handler.stream = _mock_stream_summary
+        await app._compress_context("ko")
+
+        # Older half removed, summary stored
+        assert app._context.message_count == 18  # kept half
+        assert app._context._summary is not None
+        assert "대화 요약" in app._context._summary
+
+        # Summary appears in get_messages()
+        msgs = app._context.get_messages()
+        assert msgs[1]["role"] == "user"
+        assert "[이전 대화 요약]" in msgs[1]["content"]
+        assert msgs[2]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_compress_notifies_user_via_tts(self, app: YonaApp):
+        """Compression should play start and done TTS notifications."""
+        _fill_context(app._context, 18)
+        app._chat_handler.stream = _mock_stream_summary
+
+        await app._compress_context("ko")
+
+        # Two TTS calls: start notification + done notification
+        assert app._synth.synthesize.await_count == 2
+        calls = [c.args[0] for c in app._synth.synthesize.await_args_list]
+        assert "정리하고" in calls[0]
+        assert "마쳤습니다" in calls[1]
+
+    @pytest.mark.asyncio
+    async def test_compress_failure_keeps_full_history(self, app: YonaApp):
+        """If LLM summarisation fails, messages should not be lost."""
+        _fill_context(app._context, 18)
+        original_count = app._context.message_count
+
+        async def _failing_stream(*_a, **_kw):
+            raise RuntimeError("API error")
+            yield  # noqa: unreachable — makes this an async generator
+
+        app._chat_handler.stream = _failing_stream
+        await app._compress_context("ko")
+
+        assert app._context.message_count == original_count
+        assert app._context._summary is None
+
+    @pytest.mark.asyncio
+    async def test_repeated_compression_chains_summaries(self, app: YonaApp):
+        """Second compression should include the first summary."""
+        # First compression
+        _fill_context(app._context, 18)
+        app._chat_handler.stream = _mock_stream_summary
+        await app._compress_context("ko")
+        first_summary = app._context._summary
+        assert first_summary is not None
+
+        # Add more turns until threshold again
+        remaining_turns = 18 - (app._context.message_count // 2)
+        _fill_context(app._context, remaining_turns)
+        assert app._context.needs_compression
+
+        # Second compression — payload should include first summary
+        old_summary, old_msgs = app._context.get_compression_payload()
+        assert old_summary == first_summary
+
+        await app._compress_context("ko")
+        assert app._context._summary is not None
+        assert app._context.message_count < 36
+
+    @pytest.mark.asyncio
+    async def test_barge_in_no_response_does_not_lose_history(self, app: YonaApp):
+        """Repeated barge-in with no response should not shrink history."""
+        _fill_context(app._context, 17)
+        count_before = app._context.message_count  # 34
+
+        # Simulate 3 barge-ins: add_user then pop
+        for _ in range(3):
+            app._context.add_user("barge-in 발화")
+            app._context.pop_last_user()
+
+        assert app._context.message_count == count_before
+
+    @pytest.mark.asyncio
+    async def test_compression_in_process_utterance(self, app: YonaApp):
+        """Full _process_utterance flow should trigger compression at threshold."""
+        _fill_context(app._context, 17)
+        app._chat_handler.stream = _mock_stream_summary
+
+        # Simulate: LISTENING → speech ended → process
+        await app._sm.transition(CS.LISTENING)
+        app._stt.transcribe = AsyncMock(return_value="18번째 질문입니다")
+        app._pipeline.run = AsyncMock(return_value="18번째 응답입니다")
+
+        await app._on_speech_ended(Event(EventType.SPEECH_ENDED))
+        await asyncio.sleep(0.2)  # let _process_utterance run
+
+        # Compression should have fired
+        assert app._context._summary is not None
+        # State should be LISTENING or TIMEOUT_CHECK (timeout may fire quickly in tests)
+        assert app._sm.state in (CS.LISTENING, CS.TIMEOUT_CHECK)

@@ -182,7 +182,9 @@ class AudioManager:
         self._callbacks: list[Callable[[np.ndarray], None]] = []
         self._cb_lock = threading.Lock()
         self._input_stream: sd.InputStream | None = None
+        self._output_stream: sd.OutputStream | None = None
         self._playing = False
+        self._playback_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -319,8 +321,11 @@ class AudioManager:
     async def play_audio(self, audio: np.ndarray, sample_rate: int) -> None:
         """Play *audio* (mono float32) at *sample_rate* Hz.
 
-        Resamples and converts to the output format, then plays via
-        sounddevice in a thread executor so the event loop stays free.
+        Resamples and converts to the output format, then plays via an
+        explicit ``sd.OutputStream`` in a thread executor so the event
+        loop stays free.  Unlike ``sd.play()`` + ``sd.stop()``, the
+        output stream is independent of the input stream — stopping
+        playback (barge-in) never touches the microphone stream.
 
         Args:
             audio:       1-D float32 numpy array of audio samples.
@@ -329,19 +334,84 @@ class AudioManager:
         prepared = self._prepare_audio(audio, sample_rate)
         self._playing = True
         try:
-            await asyncio.to_thread(
-                sd.play,
-                prepared,
-                self._output_rate,
-                device=self._output_device,
-                blocking=True,
-            )
+            await asyncio.to_thread(self._play_blocking, prepared)
         finally:
             self._playing = False
 
+    def _play_blocking(self, prepared: np.ndarray) -> None:
+        """Play *prepared* audio using an explicit OutputStream.
+
+        Runs in a worker thread.  The ``_output_stream`` reference lets
+        :meth:`stop_playback` abort playback without affecting the input
+        stream — fixing the PortAudio mutex crash that ``sd.stop()``
+        caused when the input callback was running concurrently.
+
+        The ``_playback_lock`` serialises concurrent calls so that a new
+        OutputStream is only opened after the previous one has been fully
+        closed — preventing ALSA "Device unavailable" errors when a
+        barge-in cancels the asyncio task but the OS thread is still
+        cleaning up.
+        """
+        with self._playback_lock:
+            done = threading.Event()
+            pos = 0
+
+            log = logging.getLogger(__name__)
+
+            def _callback(
+                outdata: np.ndarray,
+                frames: int,
+                time_info: object,
+                status: sd.CallbackFlags,
+            ) -> None:
+                nonlocal pos
+                if status:
+                    log.warning("Playback status: %s", status)
+                end = pos + frames
+                chunk = prepared[pos:end]
+                if len(chunk) < frames:
+                    outdata[:len(chunk)] = chunk
+                    outdata[len(chunk):] = 0
+                    done.set()
+                    raise sd.CallbackStop
+                outdata[:] = chunk
+                pos = end
+
+            stream = sd.OutputStream(
+                samplerate=self._output_rate,
+                channels=self._output_channels,
+                device=self._output_device,
+                dtype="float32",
+                callback=_callback,
+            )
+            self._output_stream = stream
+            try:
+                stream.start()
+                # Poll instead of blocking forever — when stop_playback()
+                # calls stream.stop() externally the callback never sets
+                # `done`, so an unbounded wait deadlocks _playback_lock.
+                while not done.wait(timeout=0.05):
+                    if not stream.active:
+                        break
+                stream.stop()
+            except sd.PortAudioError:
+                pass  # stream was stopped externally (barge-in)
+            finally:
+                stream.close()
+                self._output_stream = None
+
     async def stop_playback(self) -> None:
-        """Immediately stop any current audio playback (barge-in support)."""
-        sd.stop()
+        """Stop current audio playback (barge-in).
+
+        Only stops the output stream — the input stream is untouched.
+        Safe to call when nothing is playing.
+        """
+        stream = self._output_stream
+        if stream is not None:
+            try:
+                stream.stop()
+            except sd.PortAudioError:
+                pass
 
     @property
     def is_playing(self) -> bool:
@@ -393,8 +463,8 @@ class ChimePlayer:
         manager: Shared :class:`AudioManager` used for playback.
     """
 
-    _CHIME_SAMPLE_RATE = 24_000   # Hz — same as XTTS v2 output
-    _DURATION = 1.0               # seconds — total chime length
+    _CHIME_SAMPLE_RATE = 24_000   # Hz — for programmatic chime generation
+    _DURATION = 0.3               # seconds — short chime for snappy UX
     _FREQ_BASE = 880.0            # Hz — A5 기준음
     # (ratio, amplitude, decay_rate) — 벨 배음 구조
     # ratio: 기본음 대비 배음 비율, decay: 지수 감쇠 속도 (클수록 빨리 소멸)
@@ -407,19 +477,35 @@ class ChimePlayer:
 
     def __init__(self, cfg: Config, manager: AudioManager) -> None:
         self._manager = manager
+        self._sample_rate = self._CHIME_SAMPLE_RATE
         chime_path: str | None = cfg.get("audio.chime_path", None)
         if chime_path:
-            self._audio = self._load_wav(chime_path)
+            self._audio, self._sample_rate = self._load_wav(chime_path)
         else:
             self._audio = self._generate_chime(self._CHIME_SAMPLE_RATE)
+        self._proc_audio = self._generate_proc_chime(self._CHIME_SAMPLE_RATE)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     async def play(self) -> None:
-        """Play the chime via the shared AudioManager."""
-        await self._manager.play_audio(self._audio, self._CHIME_SAMPLE_RATE)
+        """Play the wake-word chime via the shared AudioManager."""
+        await self._manager.play_audio(self._audio, self._sample_rate)
+
+    async def play_processing(self) -> None:
+        """Play a short descending chime to signal processing has started.
+
+        Non-critical — if the audio device is still busy (e.g. after a
+        barge-in), the chime is silently skipped so STT processing can
+        proceed.
+        """
+        try:
+            await self._manager.play_audio(self._proc_audio, self._sample_rate)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Processing chime skipped (device busy)"
+            )
 
     # ------------------------------------------------------------------
     # Chime generation
@@ -449,8 +535,25 @@ class ChimePlayer:
         return wave.astype(np.float32)
 
     @staticmethod
-    def _load_wav(path: str) -> np.ndarray:
-        """Load a WAV file and return a float32 mono array.
+    def _generate_proc_chime(sample_rate: int) -> np.ndarray:
+        """Generate a short descending two-tone chime (0.15 s).
+
+        Plays a quick 880→660 Hz glide to signal "I heard you, processing
+        now".  Kept very short so it doesn't delay STT start noticeably.
+        """
+        dur = 0.15
+        n = int(sample_rate * dur)
+        t = np.linspace(0.0, dur, n, endpoint=False)
+        # Frequency glides from 880 Hz down to 660 Hz (A5 → E5)
+        freq = 880.0 - (880.0 - 660.0) * (t / dur)
+        phase = np.cumsum(2.0 * math.pi * freq / sample_rate)
+        envelope = np.exp(-6.0 * t)  # fast decay
+        wave = 0.5 * envelope * np.sin(phase)
+        return wave.astype(np.float32)
+
+    @staticmethod
+    def _load_wav(path: str) -> tuple[np.ndarray, int]:
+        """Load a WAV file and return (float32 mono array, sample_rate).
 
         Requires ``soundfile`` (``pip install soundfile``).
 
@@ -465,7 +568,7 @@ class ChimePlayer:
                 "Install with: pip install soundfile"
             ) from exc
 
-        data, _ = sf.read(path, dtype="float32", always_2d=False)
+        data, sr = sf.read(path, dtype="float32", always_2d=False)
         if data.ndim == 2:
             data = data.mean(axis=1)  # stereo → mono
-        return data
+        return data, int(sr)

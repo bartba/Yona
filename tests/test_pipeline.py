@@ -10,8 +10,6 @@ import numpy as np
 import pytest
 
 # --- Mock heavy TTS/LLM imports before importing src modules ---
-sys.modules.setdefault("melo", MagicMock())
-sys.modules.setdefault("melo.api", MagicMock())
 sys.modules.setdefault("openai", MagicMock())
 sys.modules.setdefault("anthropic", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
@@ -27,7 +25,7 @@ from src.pipeline import PhraseAccumulator, StreamingPipeline, _LANG_MAP  # noqa
 
 
 class TestPhraseAccumulator:
-    """PhraseAccumulator sentence-boundary detection."""
+    """PhraseAccumulator sentence- and clause-boundary detection."""
 
     def test_no_boundary_yet(self):
         acc = PhraseAccumulator()
@@ -115,6 +113,58 @@ class TestPhraseAccumulator:
         assert len(phrases) == 2
         assert phrases[1] == "Let me think."
 
+    # --- Clause-boundary splitting (comma, semicolon, colon) ---
+
+    def test_comma_split(self):
+        """Comma + whitespace triggers a split."""
+        acc = PhraseAccumulator()
+        phrases = acc.feed("안녕하세요, 반갑습니다.")
+        assert "안녕하세요," in phrases
+        remaining = acc.flush()
+        if remaining:
+            phrases.append(remaining)
+        full = " ".join(phrases)
+        assert "반갑습니다" in full
+
+    def test_semicolon_split(self):
+        acc = PhraseAccumulator()
+        phrases = acc.feed("First part; second part. ")
+        assert any("First part;" in p for p in phrases)
+
+    def test_colon_split(self):
+        acc = PhraseAccumulator()
+        phrases = acc.feed("Note: this is important. ")
+        assert any("Note:" in p for p in phrases)
+
+    def test_newline_only_split(self):
+        """Bare newline (no preceding punctuation) triggers a split."""
+        acc = PhraseAccumulator()
+        phrases = acc.feed("Line one\nLine two")
+        assert phrases == ["Line one"]
+        assert acc.flush() == "Line two"
+
+    def test_em_dash_split(self):
+        """Em-dash (—) triggers a split."""
+        acc = PhraseAccumulator()
+        phrases = acc.feed("First part\u2014second part")
+        assert phrases == ["First part\u2014"]
+        assert acc.flush() == "second part"
+
+    def test_comma_merge_short_phrases(self):
+        """Short comma-separated clauses merge when min_length is set."""
+        acc = PhraseAccumulator(min_length=15)
+        phrases = acc.feed("네, 좋은 질문이에요! 다음 질문도 해주세요. ")
+        # "네," (3) + "좋은 질문이에요!" (9) → merged (12 < 15, pushed back)
+        # Eventually merges into longer phrase
+        all_phrases = list(phrases)
+        remaining = acc.flush()
+        if remaining:
+            all_phrases.append(remaining)
+        # All text should be present
+        full = " ".join(all_phrases)
+        assert "네," in full
+        assert "질문" in full
+
 
 # =========================================================================
 # Helper mocks
@@ -194,7 +244,7 @@ class TestStreamingPipeline:
         """Tokens → phrases → TTS → playback, full response returned."""
         handler = MockChatHandler(["Hello world. ", "How are you?"])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         response = await pipeline.run(ctx)
 
@@ -210,7 +260,7 @@ class TestStreamingPipeline:
         """When LLM output has no sentence boundary, flush emits the text."""
         handler = MockChatHandler(["Hello world"])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         response = await pipeline.run(ctx)
 
@@ -231,7 +281,7 @@ class TestStreamingPipeline:
         done_q = bus.subscribe(EventType.PLAYBACK_DONE)
         llm_done_q = bus.subscribe(EventType.LLM_RESPONSE_DONE)
 
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
         await pipeline.run(ctx)
 
         # PHRASE_READY events
@@ -273,7 +323,7 @@ class TestStreamingPipeline:
 
         synth.synthesize = slow_synthesize
 
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         async def interrupt_soon():
             await asyncio.sleep(0.1)
@@ -290,7 +340,7 @@ class TestStreamingPipeline:
         """Calling interrupt() twice does not raise."""
         handler = MockChatHandler(["Hello."])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         await pipeline.run(ctx)
         # After run completes, interrupt should be a no-op
@@ -302,28 +352,28 @@ class TestStreamingPipeline:
         """detected_language triggers set_language on the synthesizer."""
         handler = MockChatHandler(["안녕하세요."])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         await pipeline.run(ctx, detected_language="ko")
 
-        assert synth._language == "KR"
+        assert synth._language == "ko"
 
     @pytest.mark.asyncio
     async def test_language_switch_english(self, bus, synth, audio):
         handler = MockChatHandler(["Hello."])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         await pipeline.run(ctx, detected_language="en")
 
-        assert synth._language == "EN"
+        assert synth._language == "en"
 
     @pytest.mark.asyncio
     async def test_language_switch_unknown(self, bus, synth, audio):
         """Unknown language code does not call set_language."""
         handler = MockChatHandler(["Test."])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         await pipeline.run(ctx, detected_language="xx")
 
@@ -342,7 +392,7 @@ class TestStreamingPipeline:
 
         handler = MockChatHandler(["Hello."])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, PlainSynth(), audio, bus)
+        pipeline = StreamingPipeline(handler, PlainSynth(), audio, bus, min_phrase_length=0)
 
         # Should not raise
         await pipeline.run(ctx, detected_language="ko")
@@ -351,7 +401,7 @@ class TestStreamingPipeline:
     async def test_full_response_property(self, bus, synth, audio):
         handler = MockChatHandler(["One. ", "Two."])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         result = await pipeline.run(ctx)
 
@@ -379,7 +429,7 @@ class TestStreamingPipeline:
         ctx = MagicMock()
 
         error_q = bus.subscribe(EventType.ERROR)
-        pipeline = StreamingPipeline(handler, FailOnceSynth(), audio, bus)
+        pipeline = StreamingPipeline(handler, FailOnceSynth(), audio, bus, min_phrase_length=0)
         await pipeline.run(ctx)
 
         # Error event published for the failed phrase
@@ -392,7 +442,7 @@ class TestStreamingPipeline:
         """Empty LLM response produces no TTS or playback."""
         handler = MockChatHandler([])
         ctx = MagicMock()
-        pipeline = StreamingPipeline(handler, synth, audio, bus)
+        pipeline = StreamingPipeline(handler, synth, audio, bus, min_phrase_length=0)
 
         response = await pipeline.run(ctx)
 
@@ -405,10 +455,10 @@ class TestLangMap:
     """Verify language code mapping."""
 
     def test_known_languages(self):
-        assert _LANG_MAP["ko"] == "KR"
-        assert _LANG_MAP["en"] == "EN"
-        assert _LANG_MAP["ja"] == "JP"
-        assert _LANG_MAP["zh"] == "ZH"
+        assert _LANG_MAP["ko"] == "ko"
+        assert _LANG_MAP["en"] == "en"
+        assert _LANG_MAP["es"] == "es"
+        assert _LANG_MAP["pt"] == "pt"
 
     def test_unknown_language(self):
         assert _LANG_MAP.get("xx") is None

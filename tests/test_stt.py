@@ -53,6 +53,7 @@ _STT_YAML = textwrap.dedent("""\
       model_size: "large-v3-turbo"
       device: "cuda"
       compute_type: "float16"
+      beam_size: 3
       language: null
     """)
 
@@ -227,7 +228,7 @@ class TestTranscriberTranscribe:
         instance.transcribe.return_value = ([], MagicMock())
         await transcriber.transcribe(_silence())
         _, kwargs = instance.transcribe.call_args
-        assert kwargs["beam_size"] == 5
+        assert kwargs["beam_size"] == 3
 
     @pytest.mark.asyncio
     async def test_returns_string_type(self, transcriber, mock_model):

@@ -76,7 +76,9 @@ class ConversationContext:
     """Active conversation: system prompt + rolling message history.
 
     Keeps the last *max_history_turns* user+assistant pairs so the token
-    count stays manageable.
+    count stays manageable.  When the history reaches the compression
+    threshold, the caller can summarise the older half via an LLM call
+    and store the result as ``_summary``.
 
     Args:
         system_prompt:     Text injected as the ``system`` message.
@@ -87,6 +89,7 @@ class ConversationContext:
         self._system_prompt = system_prompt
         self._max_turns = max_history_turns
         self._messages: list[dict[str, str]] = []
+        self._summary: str | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -100,6 +103,15 @@ class ConversationContext:
     def message_count(self) -> int:
         """Number of stored user+assistant messages (not counting system)."""
         return len(self._messages)
+
+    @property
+    def needs_compression(self) -> bool:
+        """True when message count reaches compression threshold.
+
+        Triggers at ``max_turns - 2`` turns so the LLM has room to
+        summarise before the hard trim limit is reached.
+        """
+        return len(self._messages) >= (self._max_turns - 2) * 2
 
     # ------------------------------------------------------------------
     # Mutation
@@ -115,24 +127,66 @@ class ConversationContext:
         self._messages.append({"role": "assistant", "content": text})
         self._trim()
 
+    def pop_last_user(self) -> str | None:
+        """Remove and return the last user message, if the last message is a user turn.
+
+        Used after barge-in when no assistant response was generated, to prevent
+        consecutive user messages in the context.
+
+        Returns:
+            The removed user text, or None if the last message is not a user turn.
+        """
+        if self._messages and self._messages[-1]["role"] == "user":
+            return self._messages.pop()["content"]
+        return None
+
     def clear(self) -> None:
-        """Remove all user/assistant messages (system prompt retained)."""
+        """Remove all user/assistant messages and summary."""
         self._messages.clear()
+        self._summary = None
+
+    # ------------------------------------------------------------------
+    # Compression
+    # ------------------------------------------------------------------
+
+    def get_compression_payload(self) -> tuple[str | None, list[dict[str, str]]]:
+        """Return (old_summary, older_half_messages) for summarisation.
+
+        The caller should feed these to the LLM to produce a new summary,
+        then call :meth:`compress` with the result.
+        """
+        half = len(self._messages) // 2
+        half = half - (half % 2)  # round down to pair boundary
+        return self._summary, list(self._messages[:half])
+
+    def compress(self, summary: str) -> None:
+        """Replace the older half of messages with *summary*."""
+        half = len(self._messages) // 2
+        half = half - (half % 2)
+        self._summary = summary
+        self._messages = self._messages[half:]
+        logger.info("Context compressed: summary=%d chars, kept=%d messages",
+                    len(summary), len(self._messages))
 
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
 
     def get_messages(self) -> list[dict[str, str]]:
-        """Return full message list: system prompt first, then history."""
-        return [{"role": "system", "content": self._system_prompt}] + list(self._messages)
+        """Return full message list: system prompt, optional summary, then history."""
+        msgs: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
+        if self._summary:
+            msgs.append({"role": "user", "content": f"[이전 대화 요약]\n{self._summary}"})
+            msgs.append({"role": "assistant", "content": "네, 이전 대화 내용을 기억하고 있습니다."})
+        msgs.extend(self._messages)
+        return msgs
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     def _trim(self) -> None:
-        """Discard oldest messages to stay within max_history_turns pairs."""
+        """Hard safety net — discard oldest messages if compression was skipped."""
         max_msgs = self._max_turns * 2
         if len(self._messages) > max_msgs:
             self._messages = self._messages[-max_msgs:]
@@ -279,12 +333,16 @@ class OpenAIChatHandler:
         
         # response는 전체 텍스트가 아니라 AsyncIterator (토큰이 생성될 때마다 하나씩 도착하는 스트림)
         # 이 await 는 첫번째 토큰이 도착하기 전에 HTTP 연결만 맺고 바로 리턴한다.
+        # gpt-5-mini 등 신형 모델은 temperature=1.0(기본값) 외 값을 거부하므로 기본값이면 생략한다.
+        extra: dict[str, Any] = {}
+        if self._temperature != 1.0:
+            extra["temperature"] = self._temperature
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=context.get_messages(),  # type: ignore[arg-type]
-            max_tokens=self._max_tokens,
-            temperature=self._temperature,
+            max_completion_tokens=self._max_tokens,
             stream=True,
+            **extra,
         )
 
         # OpenAI 서버에서 토큰이 하나 생성될 때 마다 chunk 객체가 도착한다. 

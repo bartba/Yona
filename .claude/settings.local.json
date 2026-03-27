@@ -9,7 +9,8 @@
       "Bash(ls -la /home/bart/workspace/code/Yona/tests/test_*.py)",
       "Bash(python -m pytest tests/ --collect-only -q)",
       "Bash(ls -lh /home/bart/workspace/code/Yona/src/*.py)",
-      "Read(//home/bart/workspace/code/Yona/**)"
+      "Read(//home/bart/workspace/code/Yona/**)",
+      "Bash(python:*)"
     ]
   }
 }

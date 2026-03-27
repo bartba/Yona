@@ -10,8 +10,8 @@ audio:
   output_channels: 2               # confirmed: USB audio shows 2 out (hw verified)
   chunk_size: 512                  # samples/callback = 32 ms @ 16 kHz; matches Porcupine frame_length
   buffer_seconds: 30               # ring-buffer = ~1.9 MB; holds the longest expected utterance
-  chime_path: "sound/mixkit-magic-marimba-2820.wav"  # path to chime.wav; null = generate programmatically
-  volume_percent: 65                # ALSA PCM playback volume (0-100%); null = don't touch
+  chime_path: null                                   # null = generate 0.3s bell chime programmatically
+  volume_percent: 80               # ALSA PCM playback volume (0-100%); null = don't touch
 
 wake_word:
   wake_phrase: "Hey Mack"              # display phrase (what the user says); used in logs and test prompts
@@ -21,13 +21,13 @@ wake_word:
     - "Hey_Mack_20260309_205536"       # custom model; key = filename without .onnx
   inference_framework: "onnx"        # "onnx" or "tflite"
   threshold: 0.5                     # score cutoff for detection (0.0-1.0)
-  patience: 3                        # consecutive frames above threshold to trigger
+  patience: 1                        # consecutive frames above threshold to trigger
   cooldown_seconds: 2.0              # ignore re-triggers for N seconds
 
 vad:
   model_path: "models/silero_vad/silero_vad.onnx"
   threshold: 0.5                   # speech probability cutoff (LISTENING)
-  silence_duration: 0.8            # seconds of silence to end a speech segment
+  silence_duration: 1.2            # seconds of silence to end a speech segment (0.8 was too short for Korean pauses)
   min_speech_duration: 0.3         # minimum speech length to accept
   barge_in_threshold: 0.7          # higher threshold during SPEAKING (AEC residual)
 
@@ -35,10 +35,11 @@ stt:
   model_size: "large-v3-turbo"
   device: "cuda"
   compute_type: "float16"
+  beam_size: 3                     # beam search (1=greedy, 5=max; 3 balances accuracy vs Jetson 8GB memory)
   language: null                   # null = auto-detect (Korean / English)
 
 llm:
-  # Provider selection: "openai" or "custom"
+  # Provider selection: "openai" , "claude" or "custom"
   provider: "${LLM_PROVIDER}"
 
   # --- OpenAI (provider=openai) ---
@@ -58,20 +59,21 @@ llm:
 
   # --- Common ---
   max_tokens: 1024
-  temperature: 0.7
-  max_history_turns: 20            # keeps last N user+assistant pairs
+  temperature: 1.0                 # gpt-5-mini 등 신형 모델은 1.0(기본값)만 허용; OpenAI는 1.0이면 파라미터 생략
+  max_history_turns: 20           # keeps last N user+assistant pairs
 
 tts:
-  # Provider: "melo" (MeloTTS — Korean + English bilingual)
-  provider: "melo"
+  # Provider: "supertonic" (Supertonic — ONNX, Korean + English + 3 more)
+  provider: "supertonic"
 
-  # --- MeloTTS --- Korean + English bilingual
-  melo_language: "KR"              # "KR" or "EN" (default for init; pipeline switches dynamically)
-  melo_device: "cpu"               # "cpu" or "cuda" (cuda requires torch+CUDA; falls back to cpu if unavailable)
-  melo_speed: 1.0                  # speaking speed multiplier
+  # --- Supertonic --- multilingual (ko, en, es, pt, fr)
+  language: "ko"                   # default language (pipeline switches dynamically via STT)
+  voice: "M1"                      # voice style: F1-F5 (female), M1-M5 (male)
+  speed: 1.1                       # speaking speed (0.5 slow ~ 2.0 fast); 1.25→1.1 for clarity
+  total_steps: 8                   # diffusion steps (fewer = faster, more = higher quality); 5→8 for quality
 
   # --- Common ---
-  output_sample_rate: 24000        # native output rate (MeloTTS)
+  output_sample_rate: 44100        # Supertonic native output rate
 
 conversation:
   timeout_check_seconds: 15        # silence -> ask "Are you still there?"

@@ -13,10 +13,13 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import re
 import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -36,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Goodbye intent patterns (Korean + English)
 _GOODBYE_RE = re.compile(
-    r"안녕|잘\s*가|종료|그만|이만|바이바이"
-    r"|\bbye\b|\bgoodbye\b|\bsee\s+you\b|\bthat'?s\s+all\b",
+    r"안녕히|잘\s*있어|잘\s*가|종료|그만|이만|바이바이|마치|끝내|끝낼|끝날|대화\s*끝|됐어|그럴게"
+    r"|\bbye\b|\bgoodbye\b|\bsee\s+you\b|\bthat'?s\s+all\b|\bdone\b|\bend\b",
     re.IGNORECASE,
 )
 
@@ -100,16 +103,24 @@ class YonaApp:
         )
         self._chime = ChimePlayer(cfg, self._audio)
 
-        # Detection
+        # Detection (ONNX file reads fill the Linux page cache)
         self._vad = VoiceActivityDetector(cfg, bus)
         self._wake = WakeWordDetector(cfg, bus)
 
-        # Recognition
+        # Free page cache filled by ONNX model file reads above,
+        # so NvMap can allocate contiguous GPU memory for STT on Jetson.
+        self._drop_page_cache()
+
+        # Recognition — CUDA model + warm-up needs contiguous GPU memory
         self._stt = Transcriber(cfg, bus)
 
-        # LLM + TTS
+        # LLM + TTS (ONNX file reads fill the page cache ~2 GB)
         self._chat_handler = create_chat_handler(cfg, bus)
         self._synth = create_synthesizer(cfg)
+
+        # Drop page cache so CUDA pool expansion during inference can
+        # reclaim memory.  Requires sudoers NOPASSWD for drop_caches.
+        self._drop_page_cache()
 
         # Streaming pipeline
         self._pipeline = StreamingPipeline(
@@ -128,6 +139,27 @@ class YonaApp:
         self._history.purge_old()
 
         logger.info("All components initialized")
+
+    @staticmethod
+    def _drop_page_cache() -> None:
+        """Release Linux page cache to free memory for CUDA allocations.
+
+        On Jetson (unified memory) ONNX model file reads fill the page
+        cache, and NvMap cannot reclaim cached pages for contiguous GPU
+        allocations.  Dropping caches after TTS loads ensures enough
+        free memory for STT inference pool expansion.
+
+        Requires sudoers NOPASSWD; silently skips if unavailable.
+        """
+        gc.collect()
+        try:
+            subprocess.run(
+                ["sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
+                capture_output=True, timeout=5,
+            )
+            logger.info("Page cache dropped for CUDA memory headroom")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.debug("Could not drop page caches (sudo NOPASSWD not configured)")
 
     # ------------------------------------------------------------------
     # Audio callback  (sounddevice thread — sync, must return quickly)
@@ -158,34 +190,43 @@ class YonaApp:
         """Wake word detected → chime → LISTENING."""
         if self._sm.state != CS.IDLE:
             return
+        t0 = time.monotonic()
         logger.info("Wake word detected: %s", event.data)
-        await self._sm.transition(CS.LISTENING)
+        # Play chime while still IDLE so VAD/buffer don't capture chime audio
         await self._chime.play()
+        logger.info("⏱ Wake→Chime done: %.2fs", time.monotonic() - t0)
+        # Now transition — VAD and buffer start receiving audio from here
+        await self._sm.transition(CS.LISTENING)
         self._vad.reset()
         self._vad.set_barge_in_mode(False)
         self._buffer.reset()
         self._restart_timeout()
 
     async def _on_speech_started(self, event: Event) -> None:
-        """Speech detected — reset timeout or return from TIMEOUT_CHECK."""
+        """Speech detected — cancel timeout (restarted after processing) or return from TIMEOUT_CHECK."""
         state = self._sm.state
         if state == CS.TIMEOUT_CHECK:
             self._cancel_timeout()
             await self._audio.stop_playback()
             await self._sm.transition(CS.LISTENING)
             self._buffer.reset()
-            self._restart_timeout()
+            # No restart here — timeout resumes after _process_utterance completes
         elif state == CS.LISTENING:
-            self._restart_timeout()
+            self._cancel_timeout()
 
     async def _on_speech_ended(self, event: Event) -> None:
-        """Speech ended → PROCESSING → run STT + pipeline."""
+        """Speech ended → PROCESSING → chime → run STT + pipeline."""
         if self._sm.state != CS.LISTENING:
             return
         self._cancel_timeout()
         await self._sm.transition(CS.PROCESSING)
+        await self._chime.play_processing()
         # Run processing in a separate task so event handlers stay responsive
         self._process_task = asyncio.create_task(self._process_utterance())
+
+    async def _on_state_changed(self, event: Event) -> None:
+        """Log every state transition with timestamp."""
+        logger.info("▶ STATE: %s", event.data.name if hasattr(event.data, 'name') else event.data)
 
     async def _on_barge_in(self, event: Event) -> None:
         """Barge-in during SPEAKING → interrupt pipeline → LISTENING."""
@@ -195,7 +236,9 @@ class YonaApp:
         await self._pipeline.interrupt()
         self._vad.set_barge_in_mode(False)
         self._vad.reset()
-        await self._sm.transition(CS.LISTENING)
+        # _process_utterance may have already transitioned to LISTENING
+        if self._sm.state != CS.LISTENING:
+            await self._sm.transition(CS.LISTENING)
         self._buffer.reset()
         self._restart_timeout()
 
@@ -206,6 +249,7 @@ class YonaApp:
     async def _process_utterance(self) -> None:
         """STT → goodbye check → LLM+TTS pipeline → back to LISTENING."""
         """사용자가 말을 끝낸 순간(SPEECH_ENDED)부터 시작, assistant가 대답을 끝내고 다시 듣기 시작하는 순간까지의 모든것 처리"""
+        t_start = time.monotonic()
         try:
             audio = self._buffer.get_all()
             self._buffer.reset()
@@ -217,8 +261,12 @@ class YonaApp:
                 return
 
             # Transcribe
+            t_stt = time.monotonic()
             text = await self._stt.transcribe(audio)
+            stt_dur = time.monotonic() - t_stt
             lang = self._stt.detected_language or "ko"
+            logger.info("⏱ STT: %.2fs | audio=%.2fs | lang=%s | text=%s",
+                        stt_dur, len(audio) / 16000, lang, (text or "")[:80])
 
             if not text:
                 logger.info("Empty transcription — notify and back to LISTENING")
@@ -244,9 +292,11 @@ class YonaApp:
             self._vad.set_barge_in_mode(True)
             self._vad.reset()
 
+            t_pipeline = time.monotonic()
             response = await self._pipeline.run(
                 self._context, detected_language=lang,
             )
+            pipeline_dur = time.monotonic() - t_pipeline
 
             # Pipeline complete (or interrupted by barge-in)
             self._vad.set_barge_in_mode(False)
@@ -255,8 +305,25 @@ class YonaApp:
                 self._context.add_assistant(response)
                 self._history.append_turn(text, response)
                 logger.info("Assistant [%s]: %s", lang, response[:100])
+            else:
+                # Barge-in with no response — remove dangling user message
+                # to prevent consecutive user turns in context
+                self._context.pop_last_user()
+                logger.info("Barge-in: removed unanswered user message from context")
 
-            # Back to LISTENING if pipeline completed normally
+            total_dur = time.monotonic() - t_start
+            logger.info("⏱ TURN COMPLETE: total=%.2fs (STT=%.2fs + pipeline=%.2fs)",
+                        total_dur, stt_dur, pipeline_dur)
+
+            # Compress history if threshold reached.  Transition to
+            # SPEAKING first so barge-in VAD is inactive and no new
+            # speech is processed during the LLM summarisation call.
+            if self._context.needs_compression:
+                if self._sm.state != CS.SPEAKING:
+                    await self._sm.transition(CS.SPEAKING)
+                await self._compress_context(lang)
+
+            # Back to LISTENING
             if self._sm.state == CS.SPEAKING:
                 await self._sm.transition(CS.LISTENING)
                 self._vad.reset()
@@ -289,6 +356,7 @@ class YonaApp:
         await self._sm.transition(CS.IDLE)
         self._vad.reset()
         self._wake.reset()
+        gc.collect()
 
     # ------------------------------------------------------------------
     # Two-stage inactivity timeout
@@ -337,9 +405,78 @@ class YonaApp:
             await self._sm.transition(CS.IDLE)
             self._vad.reset()
             self._wake.reset()
+            gc.collect()
 
         except asyncio.CancelledError:
             pass
+
+    # ------------------------------------------------------------------
+    # Context compression
+    # ------------------------------------------------------------------
+
+    _COMPRESS_PROMPT = (
+        "Summarize the following conversation concisely in the same language "
+        "as the conversation. Preserve key facts, user preferences, topics "
+        "discussed, and any commitments made. Keep it under 200 words."
+    )
+
+    _COMPRESS_NOTIFY_START: dict[str, str] = {
+        "ko": "이전 대화 내용을 정리하고 있습니다. 잠시만 기다려 주세요.",
+        "en": "Organizing our conversation. One moment please.",
+    }
+    _COMPRESS_NOTIFY_DONE: dict[str, str] = {
+        "ko": "정리를 마쳤습니다. 이제 대화를 이어 나갈 수 있습니다.",
+        "en": "All done. We can continue our conversation.",
+    }
+
+    async def _compress_context(self, lang: str = "ko") -> None:
+        """Notify the user, then summarise older history via the LLM.
+
+        Runs while state is still SPEAKING so no new speech is processed.
+        If the LLM call fails, the full history is kept as-is.
+        """
+        if not self._chat_handler or not self._context:
+            return
+        old_summary, old_msgs = self._context.get_compression_payload()
+        if not old_msgs:
+            return
+
+        # Notify user — plays while still in SPEAKING state
+        msg = self._COMPRESS_NOTIFY_START.get(lang, self._COMPRESS_NOTIFY_START["ko"])
+        await self._play_tts(msg)
+        logger.info("Compressing context: %d messages to summarise", len(old_msgs))
+
+        # Build conversation text for summarisation
+        parts: list[str] = []
+        if old_summary:
+            parts.append(f"[이전 요약]\n{old_summary}\n")
+        for m in old_msgs:
+            role = "User" if m["role"] == "user" else "Assistant"
+            parts.append(f"{role}: {m['content']}")
+        conversation_text = "\n".join(parts)
+
+        # Use a throwaway context for the summarisation call
+        summary_ctx = ConversationContext(
+            system_prompt=self._COMPRESS_PROMPT,
+            max_history_turns=2,
+        )
+        summary_ctx.add_user(conversation_text)
+
+        try:
+            tokens: list[str] = []
+            async for token in self._chat_handler.stream(summary_ctx):
+                tokens.append(token)
+            summary = "".join(tokens)
+            if summary:
+                self._context.compress(summary)
+                logger.info("Context compressed: %d turns → summary (%d chars) + %d messages",
+                            len(old_msgs) // 2, len(summary), self._context.message_count)
+        except Exception:
+            logger.warning("Context compression failed — keeping full history")
+
+        # Notify user that compression is done
+        msg = self._COMPRESS_NOTIFY_DONE.get(lang, self._COMPRESS_NOTIFY_DONE["ko"])
+        await self._play_tts(msg)
 
     # ------------------------------------------------------------------
     # TTS helper
@@ -384,6 +521,7 @@ class YonaApp:
 
     async def run(self) -> None:
         """Start all components and run the main event loop."""
+        self._bus.set_loop(asyncio.get_running_loop())
         await self._init_components()
 
         # Register audio callback and start the mic stream
@@ -406,6 +544,9 @@ class YonaApp:
             ),
             asyncio.create_task(
                 self._listen(EventType.BARGE_IN_DETECTED, self._on_barge_in),
+            ),
+            asyncio.create_task(
+                self._listen(EventType.STATE_CHANGED, self._on_state_changed),
             ),
         ]
 
@@ -482,9 +623,11 @@ def main() -> None:
         _list_devices()
         return
 
-    # Logging
+    # Logging — honour LOG_LEVEL env var (default: INFO)
+    import os
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 

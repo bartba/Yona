@@ -91,14 +91,20 @@ class EventBus:
     Designed to be instantiated once and shared across all components.
 
     Thread safety:
-        :meth:`publish_nowait` is safe to call from synchronous callbacks
-        (e.g. the sounddevice audio callback) because ``Queue.put_nowait``
-        is thread-safe for CPython.  Overflow events are silently dropped.
+        :meth:`publish_nowait` uses ``loop.call_soon_threadsafe`` to safely
+        enqueue events from non-asyncio threads (e.g. sounddevice callbacks).
+        This ensures the event loop is properly woken up to process the event.
+        Overflow events are silently dropped.
     """
 
     def __init__(self) -> None:
         # Maps EventType → list of subscriber queues
         self._subscribers: dict[EventType, list[asyncio.Queue[Event]]] = defaultdict(list)
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Store a reference to the running event loop for thread-safe publishing."""
+        self._loop = loop
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -144,15 +150,23 @@ class EventBus:
             await q.put(event)
 
     def publish_nowait(self, event_type: EventType, data: Any = None) -> None:
-        """Publish without blocking — safe from synchronous contexts.
+        """Publish from any thread — safe from synchronous contexts.
 
-        Events are dropped (not buffered) if a subscriber's queue is full.
-        Use this only from sounddevice callbacks or other sync code where
-        ``await`` is not available.
+        Uses ``loop.call_soon_threadsafe`` to schedule the put on the event
+        loop thread, which properly wakes up any ``await q.get()`` waiters.
+
+        Falls back to direct ``put_nowait`` if the loop is not set (tests).
         """
         event = Event(type=event_type, data=data)
-        for q in list(self._subscribers.get(event_type, [])):
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                pass  # slow subscriber — drop rather than block
+        if self._loop is not None and self._loop.is_running():
+            for q in list(self._subscribers.get(event_type, [])):
+                try:
+                    self._loop.call_soon_threadsafe(q.put_nowait, event)
+                except RuntimeError:
+                    pass  # loop closed
+        else:
+            for q in list(self._subscribers.get(event_type, [])):
+                try:
+                    q.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass

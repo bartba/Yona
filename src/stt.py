@@ -52,6 +52,7 @@ class Transcriber:
         device: str = cfg.get("stt.device", "cuda")
         compute_type: str = cfg.get("stt.compute_type", "float16")
         self._language: str | None = cfg.get("stt.language", None)
+        self._beam_size: int = cfg.get("stt.beam_size", 1)
         self._detected_language: str | None = None
 
         self._model = WhisperModel(
@@ -59,6 +60,17 @@ class Transcriber:
             device=device,
             compute_type=compute_type,
         )
+
+        # Warm-up: minimal inference to trigger CUDA kernel compilation.
+        # Keep the allocation small (1s silence, beam=1) so the memory
+        # pool stays minimal — real inference will grow it gradually.
+        # A large warm-up (15s/beam=3) pre-allocates ~1GB extra and
+        # causes OOM on Jetson 8GB unified memory.
+        logger.info("STT warm-up: compiling CUDA kernels...")
+        dummy = np.zeros(16_000, dtype=np.float32)  # 1 second of silence
+        segments, _ = self._model.transcribe(dummy, language="en", beam_size=1)
+        _ = list(segments)  # exhaust the generator
+        logger.info("STT warm-up done")
 
     # ------------------------------------------------------------------
     # Properties
@@ -116,7 +128,7 @@ class Transcriber:
         segments, info = self._model.transcribe(
             audio,
             language=self._language,
-            beam_size=5,
+            beam_size=self._beam_size,
         )
         text = "".join(seg.text for seg in segments).strip()
         self._detected_language = info.language

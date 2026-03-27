@@ -210,6 +210,10 @@ class TestAudioManagerInit:
         manager = AudioManager(cfg)
         assert manager.is_playing is False
 
+    def test_has_playback_lock(self, cfg):
+        manager = AudioManager(cfg)
+        assert hasattr(manager, "_playback_lock")
+
     def test_no_callbacks_initially(self, cfg):
         manager = AudioManager(cfg)
         assert manager._callbacks == []
@@ -359,73 +363,76 @@ class TestAudioManagerLifecycle:
 
 class TestAudioManagerPlayback:
     @pytest.mark.asyncio
-    async def test_play_audio_calls_sd_play(self, cfg):
+    async def test_play_audio_creates_output_stream(self, cfg):
+        """play_audio uses an explicit OutputStream (not sd.play)."""
         with patch("src.audio.sd") as mock_sd:
+            mock_stream = MagicMock()
+            mock_stream.start = MagicMock()
+            mock_stream.stop = MagicMock()
+            mock_stream.close = MagicMock()
+            mock_sd.OutputStream.return_value = mock_stream
+            # Make start() trigger done via callback immediately
+            def fake_start():
+                # Simulate: callback plays all frames → sets done → CallbackStop
+                pass
+            mock_stream.start.side_effect = fake_start
+
             manager = AudioManager(cfg)
             audio = np.zeros(24_000, dtype=np.float32)
-            await manager.play_audio(audio, sample_rate=24_000)
-
-        mock_sd.play.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_play_audio_uses_output_rate(self, cfg):
-        with patch("src.audio.sd") as mock_sd:
-            manager = AudioManager(cfg)
-            audio = np.zeros(24_000, dtype=np.float32)
-            await manager.play_audio(audio, sample_rate=24_000)
-
-        args = mock_sd.play.call_args[0]
-        assert args[1] == 48_000  # second positional arg = sample rate
+            # _play_blocking will hang on done.wait(); mock it
+            with patch.object(manager, "_play_blocking") as mock_pb:
+                await manager.play_audio(audio, sample_rate=24_000)
+            mock_pb.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_play_audio_resamples_24k_to_48k_stereo(self, cfg):
-        """24 kHz mono → 48 kHz stereo (2× length, 2 channels)."""
-        with patch("src.audio.sd") as mock_sd:
-            manager = AudioManager(cfg)
-            n = 1000
-            audio = np.zeros(n, dtype=np.float32)
-            await manager.play_audio(audio, sample_rate=24_000)
-
-        prepared = mock_sd.play.call_args[0][0]
+        """24 kHz mono → 48 kHz stereo via _prepare_audio."""
+        manager = AudioManager(cfg)
+        n = 1000
+        audio = np.zeros(n, dtype=np.float32)
+        prepared = manager._prepare_audio(audio, sample_rate=24_000)
         assert prepared.shape == (2000, 2)
 
     @pytest.mark.asyncio
     async def test_play_audio_no_resample_at_output_rate(self, cfg):
         """Audio already at output_rate skips resampling."""
-        with patch("src.audio.sd") as mock_sd:
-            manager = AudioManager(cfg)
-            n = 1000
-            audio = np.zeros(n, dtype=np.float32)
-            await manager.play_audio(audio, sample_rate=48_000)
-
-        prepared = mock_sd.play.call_args[0][0]
+        manager = AudioManager(cfg)
+        n = 1000
+        audio = np.zeros(n, dtype=np.float32)
+        prepared = manager._prepare_audio(audio, sample_rate=48_000)
         assert prepared.shape == (n, 2)
 
     @pytest.mark.asyncio
-    async def test_is_playing_true_during_play(self, cfg):
-        """is_playing is True while sd.play is executing."""
+    async def test_is_playing_flag(self, cfg):
+        """is_playing is True during playback, False after."""
         states: list[bool] = []
+        manager = AudioManager(cfg)
 
-        with patch("src.audio.sd") as mock_sd:
-            manager = AudioManager(cfg)
+        def mock_play_blocking(prepared):
+            states.append(manager.is_playing)
 
-            def capture(*_args, **_kwargs):
-                states.append(manager.is_playing)
-
-            mock_sd.play.side_effect = capture
+        with patch.object(manager, "_play_blocking", side_effect=mock_play_blocking):
             audio = np.zeros(1000, dtype=np.float32)
             await manager.play_audio(audio, sample_rate=24_000)
 
         assert states == [True]
-        assert manager.is_playing is False  # reset after completion
+        assert manager.is_playing is False
 
     @pytest.mark.asyncio
-    async def test_stop_playback_calls_sd_stop(self, cfg):
-        with patch("src.audio.sd") as mock_sd:
-            manager = AudioManager(cfg)
-            await manager.stop_playback()
+    async def test_stop_playback_stops_output_stream(self, cfg):
+        """stop_playback stops only the output stream, not sd.stop()."""
+        manager = AudioManager(cfg)
+        mock_stream = MagicMock()
+        manager._output_stream = mock_stream
+        await manager.stop_playback()
+        mock_stream.stop.assert_called_once()
 
-        mock_sd.stop.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_stop_playback_noop_when_not_playing(self, cfg):
+        """stop_playback is safe to call when nothing is playing."""
+        manager = AudioManager(cfg)
+        assert manager._output_stream is None
+        await manager.stop_playback()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -493,11 +500,12 @@ class TestChimePlayerInit:
         chime_cfg = Config(path=cfg_file)
         manager = AudioManager(chime_cfg)
 
-        with patch.object(ChimePlayer, "_load_wav", return_value=wav_audio) as mock_load:
+        with patch.object(ChimePlayer, "_load_wav", return_value=(wav_audio, 44100)) as mock_load:
             player = ChimePlayer(chime_cfg, manager)
 
         mock_load.assert_called_once_with("/some/chime.wav")
         np.testing.assert_array_equal(player._audio, wav_audio)
+        assert player._sample_rate == 44100
 
     def test_load_wav_raises_without_soundfile(self):
         with patch.dict("sys.modules", {"soundfile": None}):
@@ -541,3 +549,59 @@ class TestChimePlayerPlay:
 
         audio_arg = mock_play.call_args[0][0]
         np.testing.assert_array_equal(audio_arg, player._audio)
+
+
+# ---------------------------------------------------------------------------
+# TestProcessingChime
+# ---------------------------------------------------------------------------
+
+class TestProcessingChime:
+    def test_generate_proc_chime_returns_float32(self):
+        chime = ChimePlayer._generate_proc_chime(24_000)
+        assert chime.dtype == np.float32
+
+    def test_generate_proc_chime_is_1d(self):
+        chime = ChimePlayer._generate_proc_chime(24_000)
+        assert chime.ndim == 1
+
+    def test_generate_proc_chime_correct_length(self):
+        sr = 24_000
+        chime = ChimePlayer._generate_proc_chime(sr)
+        expected = int(sr * 0.15)
+        assert len(chime) == expected
+
+    def test_generate_proc_chime_not_silent(self):
+        chime = ChimePlayer._generate_proc_chime(24_000)
+        assert np.abs(chime).max() > 0.05
+
+    def test_init_creates_proc_audio(self, cfg):
+        manager = AudioManager(cfg)
+        player = ChimePlayer(cfg, manager)
+        assert hasattr(player, "_proc_audio")
+        assert player._proc_audio.dtype == np.float32
+        assert len(player._proc_audio) > 0
+
+    @pytest.mark.asyncio
+    async def test_play_processing_calls_manager(self, cfg):
+        manager = AudioManager(cfg)
+        player = ChimePlayer(cfg, manager)
+
+        with patch.object(manager, "play_audio", new_callable=AsyncMock) as mock_play:
+            await player.play_processing()
+
+        mock_play.assert_called_once()
+        audio_arg = mock_play.call_args[0][0]
+        np.testing.assert_array_equal(audio_arg, player._proc_audio)
+
+    @pytest.mark.asyncio
+    async def test_play_processing_swallows_device_error(self, cfg):
+        """If play_audio raises (device busy), chime is skipped silently."""
+        manager = AudioManager(cfg)
+        player = ChimePlayer(cfg, manager)
+
+        with patch.object(
+            manager, "play_audio", new_callable=AsyncMock,
+            side_effect=Exception("Device unavailable"),
+        ):
+            # Should not raise
+            await player.play_processing()

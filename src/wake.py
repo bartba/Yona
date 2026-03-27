@@ -28,6 +28,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
 
@@ -36,6 +37,8 @@ from openwakeword.model import Model as OwwModel
 
 from src.config import Config
 from src.events import EventBus, EventType
+
+logger = logging.getLogger(__name__)
 
 
 class WakeWordDetector:
@@ -78,6 +81,15 @@ class WakeWordDetector:
         self._last_trigger: float = 0.0  # monotonic time of the last detection
         # Patience counter: consecutive frames above threshold per model
         self._patience_count: dict[str, int] = defaultdict(int)
+        self._chunk_count: int = 0  # for periodic debug logging
+        self._max_score: float = 0.0  # track peak score for debugging
+
+        logger.info(
+            "WakeWordDetector ready | models=%s active=%s threshold=%.2f "
+            "patience=%d cooldown=%.1fs",
+            list(self._model.models.keys()), self._active_models,
+            self._threshold, self._patience, self._cooldown,
+        )
 
     # ------------------------------------------------------------------
     # Properties
@@ -122,8 +134,24 @@ class WakeWordDetector:
             if self._active_models and name not in self._active_models:
                 continue
 
+            # Track peak score and log periodically (~every 3 seconds at 32ms/chunk)
+            if score > self._max_score:
+                self._max_score = score
+            self._chunk_count += 1
+            if self._chunk_count % 94 == 0:
+                logger.debug(
+                    "Wake score: %.4f (max=%.4f patience=%d/%d) [%s]",
+                    score, self._max_score, self._patience_count[name],
+                    self._patience, name,
+                )
+                self._max_score = 0.0
+
             if score >= self._threshold:
                 self._patience_count[name] += 1
+                logger.debug(
+                    "Wake above threshold: %.4f patience=%d/%d [%s]",
+                    score, self._patience_count[name], self._patience, name,
+                )
             else:
                 self._patience_count[name] = 0
 
@@ -131,6 +159,7 @@ class WakeWordDetector:
                     and now - self._last_trigger >= self._cooldown):
                 self._last_trigger = now
                 self._patience_count[name] = 0
+                logger.info("Wake word TRIGGERED: %s (score=%.4f)", name, score)
                 self._bus.publish_nowait(EventType.WAKE_WORD_DETECTED, data=name)
                 break  # one detection per chunk is enough
 

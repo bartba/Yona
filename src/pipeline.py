@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -39,17 +40,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Sentence-ending punctuation:
-#   ASCII .!? → require trailing whitespace to confirm sentence end
-#   CJK 。！？ → split immediately (no whitespace needed in CJK text)
-_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|(?<=[。！？])")
+# Phrase-splitting at natural pause points:
+#   Sentence end:   .!? + whitespace, CJK 。！？ (immediate)
+#   Clause boundary: ,;: + whitespace, CJK ，；：ㆍ (immediate)
+#   Dash pause:     — or – (em/en dash)
+#   Line break:     one or more newlines
+_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+"
+    r"|(?<=[。！？])"
+    r"|(?<=[,;:])\s+"
+    r"|(?<=[，；：])"
+    r"|(?<=[—–])\s*"
+    r"|\n+"
+)
 
-# STT language code → MeloTTS language code
+# STT language code → TTS language code (Supertonic uses lowercase)
 _LANG_MAP: dict[str, str] = {
-    "ko": "KR",
-    "en": "EN",
-    "ja": "JP",
-    "zh": "ZH",
+    "ko": "ko",
+    "en": "en",
+    "es": "es",
+    "pt": "pt",
+    "fr": "fr",
 }
 
 
@@ -65,10 +76,20 @@ class PhraseAccumulator:
     worker to start synthesis while the LLM is still generating.
 
     After the LLM stream ends, call :meth:`flush` to emit any remaining text.
+
+    Args:
+        min_length: Minimum character count before a phrase is emitted.
+            Short phrases (e.g. "안녕하세요!") produce short audio, so
+            when TTS RTF > 1.0x the playback finishes before the next
+            chunk is ready — causing audible silence gaps.  Setting
+            *min_length* ≥ 30 encourages merging short sentences into
+            longer chunks that provide enough playback overlap for the
+            TTS worker to stay ahead.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, min_length: int = 0) -> None:
         self._buffer = ""
+        self._min_length = min_length
 
     def feed(self, token: str) -> list[str]:
         """Feed a token and return any complete phrases.
@@ -80,9 +101,35 @@ class PhraseAccumulator:
         if len(parts) <= 1:
             return []
         # All but last are complete phrases; last stays in buffer
-        phrases = [p for p in parts[:-1] if p.strip()]
+        candidates = [p for p in parts[:-1] if p.strip()]
         self._buffer = parts[-1]
-        return phrases
+
+        if not candidates:
+            return []
+
+        # Merge short leading candidates so the first emitted phrase
+        # produces enough audio to overlap with the next TTS call.
+        if self._min_length <= 0:
+            return candidates
+
+        merged: list[str] = []
+        acc = ""
+        for c in candidates:
+            if acc:
+                acc += " " + c
+            else:
+                acc = c
+            if len(acc) >= self._min_length:
+                merged.append(acc)
+                acc = ""
+        # If leftover is below min_length, push it back to buffer
+        # so it gets merged with future tokens.
+        if acc:
+            if self._buffer:
+                self._buffer = acc + " " + self._buffer
+            else:
+                self._buffer = acc
+        return merged
 
     def flush(self) -> str | None:
         """Return remaining buffered text, or *None* if empty."""
@@ -117,12 +164,21 @@ class StreamingPipeline:
         bus:           Shared event bus.
     """
 
+    #: Per-language minimum phrase lengths (chars).  With clause-level
+    #: splitting (commas, colons, etc.) short fragments are common;
+    #: these minimums merge them into natural-sounding chunks before
+    #: TTS synthesis.  Values are set so that 2-3 short clauses merge
+    #: into one TTS call (better prosody, fewer inter-phrase gaps).
+    _MIN_PHRASE_BY_LANG: dict[str, int] = {"ko": 15, "en": 30}
+    DEFAULT_MIN_PHRASE_LENGTH = 15
+
     def __init__(
         self,
         chat_handler: ChatHandler,
         synthesizer: Synthesizer,
         audio_manager: AudioManager,
         bus: EventBus,
+        min_phrase_length: int | None = None,
     ) -> None:
         self._handler = chat_handler
         self._synth = synthesizer
@@ -131,6 +187,11 @@ class StreamingPipeline:
         self._interrupted = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._full_response = ""
+        self._min_phrase_length = (
+            min_phrase_length
+            if min_phrase_length is not None
+            else self.DEFAULT_MIN_PHRASE_LENGTH
+        )
 
     @property
     def full_response(self) -> str:
@@ -161,15 +222,25 @@ class StreamingPipeline:
         self._interrupted.clear()
         self._full_response = ""
 
-        # Dynamic TTS language switch (MeloTTS only)
-        if detected_language:
-            await self._switch_tts_language(detected_language)
+        # Dynamic TTS language switch — runs in parallel with the LLM
+        # request so the language-switch latency (~15 s on Jetson when the
+        # BERT G2P model needs to be reloaded) does not delay the LLM
+        # network round-trip.  The TTS worker waits on _tts_ready before
+        # synthesising the first phrase.
+        self._tts_ready: asyncio.Event = asyncio.Event()
+        if detected_language and hasattr(self._synth, "set_language"):
+            lang_task = asyncio.create_task(
+                self._switch_tts_language_and_signal(detected_language)
+            )
+        else:
+            self._tts_ready.set()
+            lang_task = None
 
         phrase_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=5)
         audio_queue: asyncio.Queue[tuple[np.ndarray, int] | None] = asyncio.Queue(maxsize=10)
 
         self._tasks = [
-            asyncio.create_task(self._llm_worker(context, phrase_queue)),
+            asyncio.create_task(self._llm_worker(context, phrase_queue, detected_language)),
             asyncio.create_task(self._tts_worker(phrase_queue, audio_queue)),
             asyncio.create_task(self._playback_worker(audio_queue)),
         ]
@@ -178,6 +249,15 @@ class StreamingPipeline:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
             pass
+
+        # Ensure the language task is awaited even if the pipeline was
+        # interrupted, to avoid unawaited-coroutine warnings.
+        if lang_task is not None and not lang_task.done():
+            lang_task.cancel()
+            try:
+                await lang_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         self._tasks.clear()
         return self._full_response
@@ -209,9 +289,18 @@ class StreamingPipeline:
         self,
         context: ConversationContext,
         phrase_queue: asyncio.Queue[str | None],
+        detected_language: str | None = None,
     ) -> None:
         """Stream LLM tokens → PhraseAccumulator → phrase_queue."""
-        acc = PhraseAccumulator()
+        # Use language-specific min_length when no explicit override was given
+        if self._min_phrase_length != self.DEFAULT_MIN_PHRASE_LENGTH or detected_language is None:
+            min_len = self._min_phrase_length
+        else:
+            min_len = self._MIN_PHRASE_BY_LANG.get(
+                detected_language.lower(), self._min_phrase_length,
+            )
+        acc = PhraseAccumulator(min_length=min_len)
+        logger.info("LLM worker: lang=%s min_phrase_length=%d", detected_language, min_len)
         try:
             async for token in self._handler.stream(context):
                 if self._interrupted.is_set():
@@ -235,6 +324,8 @@ class StreamingPipeline:
         finally:
             # Always publish DONE so main.py subscribers never hang —
             # even on barge-in or error where the stream was cut short.
+            # Note: the LLM handler also publishes this on normal completion,
+            # so subscribers may see it twice — this is intentional for safety.
             await self._bus.publish(EventType.LLM_RESPONSE_DONE)
             await phrase_queue.put(None)
 
@@ -243,14 +334,33 @@ class StreamingPipeline:
         phrase_queue: asyncio.Queue[str | None],
         audio_queue: asyncio.Queue[tuple[np.ndarray, int] | None],
     ) -> None:
-        """Read phrases → synthesize audio → audio_queue."""
+        """Read phrases → synthesize audio → audio_queue.
+
+        Waits for ``_tts_ready`` before synthesising the first phrase so
+        that a concurrent language switch (which reloads the BERT model)
+        can finish while the LLM is already streaming.
+        """
         try:
+            first = True
             while True:
                 phrase = await phrase_queue.get()
                 if phrase is None or self._interrupted.is_set():
                     break
+                # Wait for language switch to complete before first synthesis
+                if first:
+                    await self._tts_ready.wait()
+                    first = False
                 try:
+                    t0 = time.monotonic()
                     audio, sr = await self._synth.synthesize(phrase)
+                    synth_dur = time.monotonic() - t0
+                    audio_dur = len(audio) / sr
+                    logger.info(
+                        "TTS phrase done: synth=%.2fs audio=%.2fs RTF=%.2fx  \"%s\"",
+                        synth_dur, audio_dur,
+                        synth_dur / audio_dur if audio_dur > 0 else 0,
+                        phrase[:40],
+                    )
                     await self._bus.publish(
                         EventType.AUDIO_CHUNK_READY, data=(audio, sr),
                     )
@@ -270,12 +380,27 @@ class StreamingPipeline:
         """Read audio chunks → play via AudioManager."""
         await self._bus.publish(EventType.PLAYBACK_STARTED)
         try:
+            idx = 0
             while True:
+                t_wait = time.monotonic()
                 item = await audio_queue.get()
+                wait_dur = time.monotonic() - t_wait
                 if item is None or self._interrupted.is_set():
                     break
                 audio, sr = item
+                audio_dur = len(audio) / sr
+                logger.info(
+                    "Playback[%d] start: waited=%.2fs audio=%.2fs",
+                    idx, wait_dur, audio_dur,
+                )
+                t0 = time.monotonic()
                 await self._audio.play_audio(audio, sr)
+                play_dur = time.monotonic() - t0
+                logger.info(
+                    "Playback[%d] done: play=%.2fs (expected=%.2fs)",
+                    idx, play_dur, audio_dur,
+                )
+                idx += 1
         except asyncio.CancelledError:
             raise
         finally:
@@ -285,15 +410,27 @@ class StreamingPipeline:
     # Language switching
     # ------------------------------------------------------------------
 
+    async def _switch_tts_language_and_signal(self, language: str) -> None:
+        """Switch TTS language and signal ``_tts_ready`` when done.
+
+        Runs concurrently with the LLM worker so that network round-trip
+        and language-switch I/O overlap.  The TTS worker waits on
+        ``_tts_ready`` before its first synthesis call.
+        """
+        try:
+            await self._switch_tts_language(language)
+        finally:
+            self._tts_ready.set()
+
     async def _switch_tts_language(self, language: str) -> None:
-        """Switch TTS language if the synthesizer supports it (MeloTTS)."""
+        """Switch TTS language if the synthesizer supports it."""
         if not hasattr(self._synth, "set_language"):
             return
-        melo_lang = _LANG_MAP.get(language.lower())
-        if melo_lang is None:
-            logger.debug("No MeloTTS mapping for language %r, skipping", language)
+        tts_lang = _LANG_MAP.get(language.lower())
+        if tts_lang is None:
+            logger.debug("No TTS mapping for language %r, skipping", language)
             return
         try:
-            await self._synth.set_language(melo_lang)  # type: ignore[attr-defined]
+            await self._synth.set_language(tts_lang)  # type: ignore[attr-defined]
         except Exception as exc:
-            logger.warning("Failed to switch TTS language to %s: %s", melo_lang, exc)
+            logger.warning("Failed to switch TTS language to %s: %s", tts_lang, exc)
