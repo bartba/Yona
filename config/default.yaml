@@ -87,6 +87,9 @@ conversation:
   empty_transcription_message:
     ko: "잘 못 들었어요. 다시 말씀해 주세요."
     en: "Sorry, I didn't catch that. Could you say it again?"
+  error_message:
+    ko: "죄송합니다, 오류가 발생했어요. 다시 말씀해 주세요."
+    en: "Sorry, something went wrong. Please try again."
   goodbye_message:
     ko: "네, 대화를 마치겠습니다. 안녕히 계세요!"
     en: "Goodbye! Have a great day!"

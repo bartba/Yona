@@ -138,9 +138,18 @@
 
 ## Phase 7: 엣지 케이스 및 스트레스
 
-### [ ] HW-15: 에러 복구
-- 빈 오디오, 네트워크 차단(iptables), 극히 짧은/긴 발화, 빠른 연속 wake
-- **성공 기준**: 모든 에러 상황에서 앱 생존, 적절한 상태 복귀
+### [x] HW-15: 에러 복구
+- 테스트 스크립트: `python tests/test_hw_error_recovery.py`
+- 빈 오디오 (1초 무음, 50ms 무음, 0 samples): CUDA OOM 예외 발생하나 앱 생존, page cache drop 후 복구 ✅
+- 빈 전사 결과 → TTS 안내 메시지 ("잘 못 들었어요") 재생 ✅
+- 극히 짧은 발화 (0.5초): STT 정상 처리, 크래시 없음 ✅
+- 극히 긴 발화 (25초): STT 정상 처리, RTF=0.16x ✅
+- API 인증 에러 (키 무효화): pipeline 크래시 없음, ERROR 이벤트 발행, 빈 응답 반환, 상태 LISTENING 복구 ✅
+  - 네트워크 차단도 동일 경로(`_llm_worker` except → `_process_utterance` except) — 차이는 타임아웃 대기 시간뿐
+  - API 복원 후 LLM 정상 호출 확인 ✅
+- 빠른 연속 wake (3회/10초): cooldown 준수 (최소 간격 2.27s), 상태 전이 안정, IDLE 복귀 ✅
+- **개선**: `_process_utterance` except 블록에 TTS 에러 안내 메시지 추가 (`conversation.error_message` config)
+- **성공 기준**: 모든 에러 상황에서 앱 생존 ✅, 적절한 상태 복귀 ✅
 
 ### [ ] HW-16: 소음 환경
 - 음악/대화/에어컨/키보드 소음 중 VAD prob 분포 측정
@@ -190,6 +199,7 @@
 | 4 | `tests/test_hw_tts.py` | MeloTTS 합성 + 재생 |
 | 5 | `tests/test_hw_pipeline.py` | 스트리밍 파이프라인 (HW-09) |
 | 5 | `tests/test_hw_bargein_pipeline.py` | Barge-in 파이프라인 중단 (HW-10) |
+| 7 | `tests/test_hw_error_recovery.py` | 에러 복구 (HW-15) |
 | 6-8 | `python -m src.main` | 전체 시스템 통합 (로그 기반) |
 
 ## 유용한 디버그 명령어

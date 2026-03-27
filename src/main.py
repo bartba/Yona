@@ -334,6 +334,14 @@ class YonaApp:
             raise
         except Exception:
             logger.exception("Error processing utterance")
+            # Notify user via TTS before returning to LISTENING
+            lang = (self._stt.detected_language if self._stt else None) or "ko"
+            msgs = self._cfg.get("conversation.error_message", {})
+            msg = msgs.get(lang, msgs.get("ko", "죄송합니다, 오류가 발생했어요."))
+            try:
+                await self._play_tts(msg)
+            except Exception:
+                pass
             if self._sm.state in (CS.PROCESSING, CS.SPEAKING):
                 try:
                     await self._sm.transition(CS.LISTENING)

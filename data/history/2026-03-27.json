@@ -278,5 +278,10 @@
     "user": "Thank you.",
     "assistant": "You're welcome! Is there anything I can help you with today?",
     "ts": "2026-03-27T15:34:30.037480"
+  },
+  {
+    "user": "맥버널드 지수에 대해 알려줘봐",
+    "assistant": "맥버널드 지수는 실제로 잘 알려진 표준 지수는 아니에요. 혹시 다른 지수를 찾고 계신 건 아닐까요? 예를 들어 맥킨지",
+    "ts": "2026-03-27T15:46:23.256896"
   }
 ]
