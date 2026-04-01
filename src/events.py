@@ -1,4 +1,4 @@
-"""events.py — Application-wide event system for Yona.
+"""events.py — Application-wide event system for Samsung Gauss.
 
 Defines all EventType values and an async EventBus (pub/sub, queue-based).
 

@@ -1,4 +1,4 @@
-"""vad.py — Voice Activity Detection for Yona.
+"""vad.py — Voice Activity Detection for Samsung Gauss.
 
 Wraps the Silero VAD v6 ONNX model with speech/silence state tracking and
 EventBus integration.

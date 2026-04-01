@@ -1,10 +1,10 @@
 ---
 name: MongoDB MCP integration plan
-description: Future plan to connect MongoDB MCP to Yona chatbot — LLM outputs structured data for MCP, then speaks the result in natural speech
+description: Future plan to connect MongoDB MCP to Samsung Gauss chatbot — LLM outputs structured data for MCP, then speaks the result in natural speech
 type: project
 ---
 
-MongoDB MCP를 Yona 챗봇에 연결하여 사용 예정.
+MongoDB MCP를 Samsung Gauss 챗봇에 연결하여 사용 예정.
 
 **구현 방향:**
 - LLM이 구조화된 데이터(MCP tool call)와 음성 출력을 분리하여 출력

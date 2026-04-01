@@ -1,4 +1,4 @@
-"""stt.py — Speech-to-Text transcription for Yona.
+"""stt.py — Speech-to-Text transcription for Samsung Gauss.
 
 Transcriber
     Wraps the faster-whisper WhisperModel (large-v3-turbo, CUDA, float16).

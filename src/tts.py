@@ -1,4 +1,4 @@
-"""tts.py — Text-to-Speech synthesizer for Yona.
+"""tts.py — Text-to-Speech synthesizer for Samsung Gauss.
 
 Provides:
   Synthesizer            — typing.Protocol for TTS backends

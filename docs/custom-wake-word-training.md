@@ -1,7 +1,7 @@
 # Custom Wake Word 모델 학습 가이드
 
 > openWakeWord를 사용하여 "Hi Inspector" 등 커스텀 wake word를 학습하고
-> Yona에 적용하는 방법을 설명합니다.
+> Samsung Gauss에 적용하는 방법을 설명합니다.
 
 ---
 
@@ -11,7 +11,7 @@
 2. [사전 준비](#사전-준비)
 3. [방법 A — Google Colab (권장)](#방법-a--google-colab-권장)
 4. [방법 B — 로컬 학습](#방법-b--로컬-학습)
-5. [Yona에 적용](#yona에-적용)
+5. [Samsung Gauss에 적용](#yona에-적용)
 6. [테스트 및 튜닝](#테스트-및-튜닝)
 7. [트러블슈팅](#트러블슈팅)
 
@@ -135,7 +135,7 @@ python -m openwakeword.train_custom_model \
 
 ---
 
-## Yona에 적용
+## Samsung Gauss에 적용
 
 ### Step 1: 모델 파일 배치
 
@@ -161,7 +161,7 @@ wake_word:
 ### Step 3: 동작 확인
 
 ```bash
-# Yona 실행
+# Samsung Gauss 실행
 python -m src.main
 
 # 또는 wake word만 단독 테스트
@@ -224,7 +224,7 @@ wake_word:
 ```
 FileNotFoundError: models/wake_word/hi_inspector.onnx
 ```
-- 파일 경로 확인. Yona 프로젝트 루트 기준 상대 경로입니다.
+- 파일 경로 확인. Samsung Gauss 프로젝트 루트 기준 상대 경로입니다.
 - `model_paths: []`로 설정하면 내장 모델로 폴백됩니다.
 
 ### 오탐이 너무 많음 (False Positives)

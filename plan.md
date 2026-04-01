@@ -1,4 +1,4 @@
-# Yona v2 — Build Plan & Progress Tracker
+# Samsung Gauss — Build Plan & Progress Tracker
 
 > **How to use this file**
 > - Check off `[ ]` → `[x]` yourself after reviewing each step

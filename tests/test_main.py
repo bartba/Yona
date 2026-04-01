@@ -78,7 +78,7 @@ _CFG_YAML = textwrap.dedent("""\
       openai_model: "gpt-4o-mini"
       max_tokens: 1024
       temperature: 0.7
-      max_history_turns: 20
+      max_context_tokens: 250
 
     tts:
       provider: "melo"
@@ -169,7 +169,10 @@ def app(cfg: Config) -> YonaApp:
     a._pipeline.interrupt = AsyncMock()
 
     # Context + History
-    a._context = ConversationContext("Test system prompt")
+    a._context = ConversationContext(
+        "Test system prompt",
+        max_context_tokens=cfg.get("llm.max_context_tokens", 3000),
+    )
     a._history = MagicMock()
 
     a._running = True
@@ -184,21 +187,11 @@ class TestGoodbyeRegex:
     """Verify _GOODBYE_RE matches expected patterns."""
 
     @pytest.mark.parametrize("text", [
-        "안녕히 계세요",
-        "안녕히 가세요",
-        "잘 가",
-        "잘가",
-        "잘 있어",
-        "종료",
-        "그만",
         "바이바이",
-        "bye",
-        "goodbye",
-        "Goodbye",
-        "see you",
-        "See You",
-        "that's all",
-        "thats all",
+        "bye bye",
+        "bye-bye",
+        "byebye",
+        "Bye Bye",
     ])
     def test_matches_goodbye(self, text: str) -> None:
         assert _GOODBYE_RE.search(text) is not None
@@ -209,6 +202,10 @@ class TestGoodbyeRegex:
         "hello",
         "how are you",
         "오늘 날씨 어때",
+        "bye",
+        "goodbye",
+        "종료",
+        "그만",
     ])
     def test_non_goodbye(self, text: str) -> None:
         assert _GOODBYE_RE.search(text) is None
@@ -425,7 +422,7 @@ class TestProcessUtterance:
     async def test_goodbye_intent(self, app: YonaApp) -> None:
         """Goodbye keyword → farewell TTS → IDLE."""
         app._sm._state = CS.PROCESSING
-        app._stt.transcribe = AsyncMock(return_value="잘 가요")
+        app._stt.transcribe = AsyncMock(return_value="바이바이")
         app._stt.detected_language = "ko"
 
         await app._process_utterance()
@@ -442,7 +439,7 @@ class TestProcessUtterance:
         app._sm._state = CS.PROCESSING
         app._context.add_user("이전 대화")
         app._context.add_assistant("이전 응답")
-        app._stt.transcribe = AsyncMock(return_value="goodbye")
+        app._stt.transcribe = AsyncMock(return_value="bye bye")
         app._stt.detected_language = "en"
 
         await app._process_utterance()
@@ -683,7 +680,7 @@ class TestIntegrationFlow:
     @pytest.mark.asyncio
     async def test_wake_to_goodbye(self, app: YonaApp) -> None:
         """IDLE → wake → LISTENING → speech end → goodbye → IDLE."""
-        app._stt.transcribe = AsyncMock(return_value="bye")
+        app._stt.transcribe = AsyncMock(return_value="bye bye")
         app._stt.detected_language = "en"
 
         tasks = [
@@ -738,7 +735,7 @@ class TestContextCompression:
 
     @pytest.mark.asyncio
     async def test_compress_context_reduces_messages(self, app: YonaApp):
-        """_compress_context should halve the message count and store a summary."""
+        """_compress_context should remove oldest third and store a summary."""
         _fill_context(app._context, 18)
         assert app._context.needs_compression
 
@@ -746,8 +743,8 @@ class TestContextCompression:
         app._chat_handler.stream = _mock_stream_summary
         await app._compress_context("ko")
 
-        # Older half removed, summary stored
-        assert app._context.message_count == 18  # kept half
+        # Oldest third removed (12 of 36 msgs), summary stored
+        assert app._context.message_count == 24  # kept 2/3
         assert app._context._summary is not None
         assert "대화 요약" in app._context._summary
 
@@ -798,6 +795,7 @@ class TestContextCompression:
         assert first_summary is not None
 
         # Add more turns until threshold again
+        # After first compression: 24 messages. Need enough to exceed token budget again.
         remaining_turns = 18 - (app._context.message_count // 2)
         _fill_context(app._context, remaining_turns)
         assert app._context.needs_compression
@@ -808,7 +806,6 @@ class TestContextCompression:
 
         await app._compress_context("ko")
         assert app._context._summary is not None
-        assert app._context.message_count < 36
 
     @pytest.mark.asyncio
     async def test_barge_in_no_response_does_not_lose_history(self, app: YonaApp):

@@ -39,8 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Goodbye intent patterns (Korean + English)
 _GOODBYE_RE = re.compile(
-    r"안녕히|잘\s*있어|잘\s*가|종료|그만|이만|바이바이|마치|끝내|끝낼|끝날|대화\s*끝|됐어|그럴게"
-    r"|\bbye\b|\bgoodbye\b|\bsee\s+you\b|\bthat'?s\s+all\b|\bdone\b|\bend\b",
+    r"바이바이|\bbye[\s\-]?bye\b",
     re.IGNORECASE,
 )
 
@@ -130,7 +129,7 @@ class YonaApp:
         # Conversation state
         self._context = ConversationContext(
             cfg.get_system_prompt(),
-            max_history_turns=cfg.get("llm.max_history_turns", 20),
+            max_context_tokens=cfg.get("llm.max_context_tokens", 3000),
         )
         self._history = ConversationHistory(
             storage_dir=cfg.get("history.storage_dir", "data/history"),
@@ -278,6 +277,7 @@ class YonaApp:
                 return
 
             logger.info("User [%s]: %s", lang, text)
+            print(f"\nUser: {text}")
 
             # Goodbye intent
             if _GOODBYE_RE.search(text):
@@ -304,6 +304,7 @@ class YonaApp:
             if response:
                 self._context.add_assistant(response)
                 self._history.append_turn(text, response)
+                print(f"Assistant: {response}")
                 logger.info("Assistant [%s]: %s", lang, response[:100])
             else:
                 # Barge-in with no response — remove dangling user message
@@ -466,7 +467,7 @@ class YonaApp:
         # Use a throwaway context for the summarisation call
         summary_ctx = ConversationContext(
             system_prompt=self._COMPRESS_PROMPT,
-            max_history_turns=2,
+            max_context_tokens=10000,  # throwaway ctx; never needs to compress
         )
         summary_ctx.add_user(conversation_text)
 

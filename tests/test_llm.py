@@ -117,9 +117,9 @@ class TestChatHandlerProtocol:
 
 class TestConversationContext:
     def test_get_messages_includes_system_first(self):
-        ctx = ConversationContext("You are Yona.")
+        ctx = ConversationContext("You are Samsung Gauss.")
         msgs = ctx.get_messages()
-        assert msgs[0] == {"role": "system", "content": "You are Yona."}
+        assert msgs[0] == {"role": "system", "content": "You are Samsung Gauss."}
 
     def test_get_messages_empty_history_has_only_system(self):
         ctx = ConversationContext("sys")
@@ -159,7 +159,10 @@ class TestConversationContext:
         assert ctx.get_messages()[0]["content"] == "sys prompt"
 
     def test_trim_keeps_last_n_turn_pairs(self):
-        ctx = ConversationContext("sys", max_history_turns=2)
+        # Each short message ("u0" etc.) = len//3 + 4 = 4 tokens; pair = 8 tokens.
+        # max_context_tokens=16 → hard-trim ceiling = int(16*1.1) = 17.
+        # A 3rd pair pushes tokens to 20 > 17, so trim fires and leaves 2 pairs.
+        ctx = ConversationContext("sys", max_context_tokens=16)
         for i in range(5):
             ctx.add_user(f"u{i}")
             ctx.add_assistant(f"a{i}")
@@ -294,7 +297,9 @@ class TestOpenAIChatHandler:
 
     def test_creates_async_openai_with_api_key(self, tmp_path, mock_openai_client):
         OpenAIChatHandler(_cfg(tmp_path), _bus())
-        _openai_stub.AsyncOpenAI.assert_called_with(api_key="sk-test")
+        _, kwargs = _openai_stub.AsyncOpenAI.call_args
+        assert kwargs["api_key"] == "sk-test"
+        assert kwargs["timeout"] is not None
 
     @pytest.mark.asyncio
     async def test_stream_yields_tokens(self, tmp_path, mock_openai_client):
@@ -392,7 +397,7 @@ class TestOpenAIChatHandler:
 
         _, kwargs = mock_openai_client.chat.completions.create.call_args
         assert kwargs["model"] == "gpt-4o-mini"
-        assert kwargs["max_tokens"] == 256
+        assert kwargs["max_completion_tokens"] == 256
         assert kwargs["temperature"] == 0.5
         assert kwargs["stream"] is True
 
@@ -417,7 +422,9 @@ class TestClaudeChatHandler:
 
     def test_creates_async_anthropic_with_api_key(self, tmp_path, mock_anthropic_client):
         ClaudeChatHandler(_cfg(tmp_path), _bus())
-        _anthropic_stub.AsyncAnthropic.assert_called_with(api_key="sk-ant-test")
+        _, kwargs = _anthropic_stub.AsyncAnthropic.call_args
+        assert kwargs["api_key"] == "sk-ant-test"
+        assert kwargs["timeout"] is not None
 
     @pytest.mark.asyncio
     async def test_stream_yields_tokens(self, tmp_path, mock_anthropic_client):

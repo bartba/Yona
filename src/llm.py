@@ -1,4 +1,4 @@
-"""llm.py — LLM chat handlers for Yona.
+"""llm.py — LLM chat handlers for Samsung Gauss.
 
 Provides:
   ChatHandler         — typing.Protocol for all LLM handlers
@@ -16,7 +16,7 @@ Usage::
     from src.llm import ConversationContext, ConversationHistory, create_chat_handler
 
     handler = create_chat_handler(cfg, bus)
-    context = ConversationContext(system_prompt, max_history_turns=20)
+    context = ConversationContext(system_prompt, max_context_tokens=3000)
     context.add_user("안녕하세요!")
 
     async for token in handler.stream(context):
@@ -75,19 +75,23 @@ class ChatHandler(Protocol):
 class ConversationContext:
     """Active conversation: system prompt + rolling message history.
 
-    Keeps the last *max_history_turns* user+assistant pairs so the token
-    count stays manageable.  When the history reaches the compression
-    threshold, the caller can summarise the older half via an LLM call
-    and store the result as ``_summary``.
+    Tracks approximate token usage of the history and triggers compression
+    when the budget is exceeded.  On compression the oldest third of
+    messages is summarised by the LLM and replaced with a compact summary
+    string stored in ``_summary``.
+
+    Token estimate: ``len(content) // 3 + 4`` per message (conservative for
+    mixed Korean/English; intentional over-estimate so we compress before
+    the model's real context limit).
 
     Args:
-        system_prompt:     Text injected as the ``system`` message.
-        max_history_turns: Maximum user+assistant pairs to retain.
+        system_prompt:      Text injected as the ``system`` message.
+        max_context_tokens: Compress when history token estimate exceeds this.
     """
 
-    def __init__(self, system_prompt: str, max_history_turns: int = 20) -> None:
+    def __init__(self, system_prompt: str, max_context_tokens: int = 3000) -> None:
         self._system_prompt = system_prompt
-        self._max_turns = max_history_turns
+        self._max_tokens = max_context_tokens
         self._messages: list[dict[str, str]] = []
         self._summary: str | None = None
 
@@ -105,13 +109,14 @@ class ConversationContext:
         return len(self._messages)
 
     @property
-    def needs_compression(self) -> bool:
-        """True when message count reaches compression threshold.
+    def history_tokens(self) -> int:
+        """Estimated token count of current history (excludes system prompt)."""
+        return sum(len(m["content"]) // 3 + 4 for m in self._messages)
 
-        Triggers at ``max_turns - 2`` turns so the LLM has room to
-        summarise before the hard trim limit is reached.
-        """
-        return len(self._messages) >= (self._max_turns - 2) * 2
+    @property
+    def needs_compression(self) -> bool:
+        """True when history token estimate meets or exceeds the budget."""
+        return self.history_tokens >= self._max_tokens
 
     # ------------------------------------------------------------------
     # Mutation
@@ -150,21 +155,21 @@ class ConversationContext:
     # ------------------------------------------------------------------
 
     def get_compression_payload(self) -> tuple[str | None, list[dict[str, str]]]:
-        """Return (old_summary, older_half_messages) for summarisation.
+        """Return (old_summary, oldest_third_messages) for summarisation.
 
         The caller should feed these to the LLM to produce a new summary,
         then call :meth:`compress` with the result.
         """
-        half = len(self._messages) // 2
-        half = half - (half % 2)  # round down to pair boundary
-        return self._summary, list(self._messages[:half])
+        third = len(self._messages) // 3
+        third = third - (third % 2)  # round down to pair boundary
+        return self._summary, list(self._messages[:third])
 
     def compress(self, summary: str) -> None:
-        """Replace the older half of messages with *summary*."""
-        half = len(self._messages) // 2
-        half = half - (half % 2)
+        """Replace the oldest third of messages with *summary*."""
+        third = len(self._messages) // 3
+        third = third - (third % 2)
         self._summary = summary
-        self._messages = self._messages[half:]
+        self._messages = self._messages[third:]
         logger.info("Context compressed: summary=%d chars, kept=%d messages",
                     len(summary), len(self._messages))
 
@@ -186,10 +191,10 @@ class ConversationContext:
     # ------------------------------------------------------------------
 
     def _trim(self) -> None:
-        """Hard safety net — discard oldest messages if compression was skipped."""
-        max_msgs = self._max_turns * 2
-        if len(self._messages) > max_msgs:
-            self._messages = self._messages[-max_msgs:]
+        """Hard safety net — discard oldest pairs if token budget is exceeded by 10%."""
+        ceiling = int(self._max_tokens * 1.1)
+        while self.history_tokens > ceiling and len(self._messages) >= 2:
+            self._messages = self._messages[2:]  # drop oldest user+assistant pair
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +327,11 @@ class OpenAIChatHandler:
         self._model: str = cfg.get("llm.openai_model", "gpt-5-mini")
         self._max_tokens: int = cfg.get("llm.max_tokens", 1024)
         self._temperature: float = cfg.get("llm.temperature", 0.7)
+        import httpx as _httpx
+
         self._client = openai.AsyncOpenAI(
             api_key=cfg.get("llm.openai_api_key", ""),
+            timeout=_httpx.Timeout(timeout=30.0, connect=10.0),
         )
 
     async def stream(self, context: ConversationContext) -> AsyncIterator[str]:  # type: ignore[override]
@@ -382,8 +390,11 @@ class ClaudeChatHandler:
         self._model: str = cfg.get("llm.claude_model", "claude-sonnet-4-6")
         self._max_tokens: int = cfg.get("llm.max_tokens", 1024)
         self._temperature: float = cfg.get("llm.temperature", 0.7)
+        import httpx as _httpx
+
         self._client = anthropic.AsyncAnthropic(
             api_key=cfg.get("llm.claude_api_key", ""),
+            timeout=_httpx.Timeout(timeout=30.0, connect=10.0),
         )
 
     async def stream(self, context: ConversationContext) -> AsyncIterator[str]:  # type: ignore[override]
@@ -447,13 +458,17 @@ class CustomLLMChatHandler:
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "x-generative-ai-client": cfg.get("llm.custom_client_token", ""),
-            "x-openapi-token": f"Bearer {cfg.get('llm.custom_key', '')}",
+            "x-openapi-token": cfg.get("llm.custom_key", ""),
         }
         user_email: str = cfg.get("llm.custom_user_email", "")
         if user_email:
             headers["x-generative-ai-user-email"] = user_email
 
-        self._client = httpx.AsyncClient(headers=headers, timeout=60.0)
+        self._client = httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(timeout=30.0, connect=10.0),
+            trust_env=False,
+        )
 
     async def stream(self, context: ConversationContext) -> AsyncIterator[str]:  # type: ignore[override]
         """Yield response tokens from the Gauss OpenAPI SSE endpoint."""

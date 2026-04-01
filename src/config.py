@@ -1,4 +1,4 @@
-"""config.py — Single source of truth for all Yona settings.
+"""config.py — Single source of truth for all Samsung Gauss settings.
 
 Loads config/default.yaml, expands ${ENV_VAR} placeholders with values from
 the .env file and the shell environment, then exposes a simple Config object.
@@ -144,4 +144,4 @@ class Config:
         prompt_path = _ROOT / "config" / "prompts" / "system_prompt.txt"
         if prompt_path.exists():
             return prompt_path.read_text(encoding="utf-8").strip()
-        return "You are Yona, a helpful voice assistant. Be concise and friendly."
+        return "You are Samsung Gauss, a helpful voice assistant. Be concise and friendly."

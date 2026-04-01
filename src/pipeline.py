@@ -1,4 +1,4 @@
-"""pipeline.py — Streaming LLM→TTS→Speaker pipeline for Yona.
+"""pipeline.py — Streaming LLM→TTS→Speaker pipeline for Samsung Gauss.
 
 Provides:
   PhraseAccumulator   — sentence boundary detection on streaming tokens

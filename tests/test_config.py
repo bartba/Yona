@@ -176,8 +176,8 @@ class TestConfigSystemPrompt:
         cfg_file.write_text("audio: {}\n")
         cfg = Config(path=cfg_file)
         prompt = cfg.get_system_prompt()
-        # The fallback must mention "Yona".
-        assert "Yona" in prompt
+        # The fallback must mention "Samsung Gauss".
+        assert "Samsung Gauss" in prompt
         assert isinstance(prompt, str)
         assert len(prompt) > 0
 

@@ -66,7 +66,7 @@ TEST_SENTENCES = [
     {
         "id": 3,
         "lang": "EN",
-        "text": "Hello! I'm Yona, your voice assistant. How can I help you today?",
+        "text": "Hello! I'm Samsung Gauss, your voice assistant. How can I help you today?",
         "desc": "영어 인사",
     },
     {

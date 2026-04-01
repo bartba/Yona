@@ -1,4 +1,4 @@
-"""wake.py — Wake word detection for Yona.
+"""wake.py — Wake word detection for Samsung Gauss.
 
 WakeWordDetector
     Wraps the openWakeWord engine (openwakeword).

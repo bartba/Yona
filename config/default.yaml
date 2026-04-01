@@ -1,4 +1,4 @@
-# Yona v2 — default configuration
+# Samsung Gauss — default configuration
 # All ${VAR} values are expanded from .env / shell environment variables.
 
 audio:
@@ -36,7 +36,8 @@ stt:
   device: "cuda"
   compute_type: "float16"
   beam_size: 3                     # beam search (1=greedy, 5=max; 3 balances accuracy vs Jetson 8GB memory)
-  language: null                   # null = auto-detect (Korean / English)
+  language: null                   # null = auto-detect; set e.g. "ko" to force a fixed language
+  allowed_languages: [ko, en]      # restrict auto-detection to these languages; first = fallback
 
 llm:
   # Provider selection: "openai" , "claude" or "custom"
@@ -60,7 +61,7 @@ llm:
   # --- Common ---
   max_tokens: 1024
   temperature: 1.0                 # gpt-5-mini 등 신형 모델은 1.0(기본값)만 허용; OpenAI는 1.0이면 파라미터 생략
-  max_history_turns: 20           # keeps last N user+assistant pairs
+  max_context_tokens: 3000        # compress history when estimated token count exceeds this
 
 tts:
   # Provider: "supertonic" (Supertonic — ONNX, Korean + English + 3 more)

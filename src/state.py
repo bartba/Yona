@@ -1,4 +1,4 @@
-"""state.py — Conversation state machine for Yona.
+"""state.py — Conversation state machine for Samsung Gauss.
 
 Defines the six application states and the allowed transitions between them.
 The StateMachine publishes STATE_CHANGED events on every successful transition.
@@ -91,7 +91,7 @@ class InvalidTransitionError(Exception):
 # ---------------------------------------------------------------------------
 
 class StateMachine:
-    """Finite-state machine for Yona's conversation flow.
+    """Finite-state machine for Samsung Gauss's conversation flow.
 
     Publishes ``EventType.STATE_CHANGED`` (data=new_state) on every
     successful transition.

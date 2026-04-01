@@ -1,4 +1,4 @@
-# Yona v2 — Voice Chat Application
+# Samsung Gauss — Voice Chat Application
 
 ## Project Overview
 A streaming voice chat assistant for Nvidia Jetson Orin Nano with Polycom Sync 20 Plus speakerphone.
@@ -10,7 +10,7 @@ See **`plan.md`** in the project root for the full step-by-step build plan and p
 Start each new session with: *"plan.md의 Step N을 진행합시다"*
 
 ## Tech Stack
-- **Wake Word**: openWakeWord (ONNX, fully offline) — configurable via `wake_word.wake_phrase` (currently "Alexa" for testing; custom model TBD)
+- **Wake Word**: openWakeWord (ONNX, fully offline) — configurable via `wake_word.wake_phrase` (currently "Hey Mack", custom model `Hey_Mack_20260309_205536.onnx`)
 - **STT**: faster-whisper `large-v3-turbo`, CUDA float16
 - **LLM**: OpenAI GPT **or** Claude (Anthropic) **or** Custom company LLM (selectable via `LLM_PROVIDER` env var)
 - **TTS**: Supertonic (ONNX, Korean+English+3 more) — CPU mode, 44.1 kHz, `tts.provider` config

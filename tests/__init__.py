@@ -1,1 +1,1 @@
-"""Tests for Yona voice chat application."""
+"""Tests for Samsung Gauss voice chat application."""

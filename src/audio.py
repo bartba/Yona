@@ -1,4 +1,4 @@
-"""audio.py — Audio I/O for Yona.
+"""audio.py — Audio I/O for Samsung Gauss.
 
 Provides three public classes:
 
