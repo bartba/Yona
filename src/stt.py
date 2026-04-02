@@ -9,6 +9,15 @@ Transcriber
     Language is either fixed (``stt.language`` in config) or auto-detected
     per utterance when the config value is ``null`` / ``None``.
 
+    When auto-detection yields a language outside ``stt.allowed_languages``
+    (default: ``[ko, en]``), a 2-pass re-transcription is performed with each
+    allowed language forced in order.  The first result whose
+    ``language_probability`` meets ``stt.lang_recheck_min_prob`` (default: 0.3)
+    is adopted; if none qualify, the 1st-pass result is kept as fallback.
+
+    This corrects short utterances like "바이바이 맥" that Whisper may
+    mis-identify as Japanese or French due to insufficient phoneme information.
+
 Usage::
 
     from src.config import Config
@@ -55,6 +64,11 @@ class Transcriber:
         self._beam_size: int = cfg.get("stt.beam_size", 1)
         self._detected_language: str | None = None
 
+        # 2-pass language fallback: when auto-detect lands outside allowed list,
+        # retry with each allowed language in order until min_prob is met.
+        self._allowed_languages: list[str] = cfg.get("stt.allowed_languages", ["ko", "en"])
+        self._lang_recheck_min_prob: float = cfg.get("stt.lang_recheck_min_prob", 0.3)
+
         self._model = WhisperModel(
             model_size,
             device=device,
@@ -91,6 +105,12 @@ class Transcriber:
         Runs WhisperModel inference in a thread-pool executor so the
         asyncio event loop is not blocked during GPU inference.
 
+        When the auto-detected language is not in ``allowed_languages``,
+        a 2-pass re-transcription is triggered with each allowed language
+        forced in order.  The first result whose ``language_probability``
+        meets ``lang_recheck_min_prob`` is adopted; otherwise the 1st-pass
+        result is kept.
+
         Publishes :data:`EventType.TRANSCRIPTION_READY` with the text as
         *data* when the transcription is non-empty.  Empty results (silence
         or noise) are returned without publishing an event.
@@ -102,7 +122,33 @@ class Transcriber:
             Stripped transcription text, or ``""`` if nothing was detected.
         """
         audio = np.asarray(audio, dtype=np.float32).ravel()
-        text: str = await asyncio.to_thread(self._run_transcribe, audio)
+        text, lang, lang_prob = await asyncio.to_thread(self._run_transcribe, audio)
+
+        # 2-pass: retry with forced language when auto-detect is outside allowed list.
+        # Fixed-language mode (self._language set) skips this — language is already forced.
+        if self._language is None and lang not in self._allowed_languages:
+            logger.info(
+                "STT lang=%s (%.0f%%) not in allowed %s — retrying with forced languages",
+                lang, lang_prob * 100, self._allowed_languages,
+            )
+            for forced_lang in self._allowed_languages:
+                r_text, r_lang, r_prob = await asyncio.to_thread(
+                    self._run_transcribe, audio, forced_lang,
+                )
+                if r_prob >= self._lang_recheck_min_prob:
+                    text, lang, lang_prob = r_text, r_lang, r_prob
+                    logger.info(
+                        "STT recheck accepted: lang=%s (%.0f%%) text=%r",
+                        lang, lang_prob * 100, text,
+                    )
+                    break
+            else:
+                logger.warning(
+                    "STT recheck: all forced langs below min_prob=%.1f — keeping 1st-pass result",
+                    self._lang_recheck_min_prob,
+                )
+
+        self._detected_language = lang
 
         if text:
             await self._bus.publish(EventType.TRANSCRIPTION_READY, data=text)
@@ -113,25 +159,32 @@ class Transcriber:
     # Internal (runs in thread-pool executor)
     # ------------------------------------------------------------------
 
-    def _run_transcribe(self, audio: np.ndarray) -> str:
+    def _run_transcribe(
+        self, audio: np.ndarray, language: str | None = None,
+    ) -> tuple[str, str, float]:
         """Blocking transcription — called from a thread-pool executor.
 
         Iterates over all Whisper segments and joins their text.  Returns
         an empty string if no speech was detected.
 
         Args:
-            audio: Mono float32 array.
+            audio:    Mono float32 array.
+            language: Force a specific language for this inference pass.
+                      When ``None``, uses the config language (auto-detect
+                      if config is also ``None``).
 
         Returns:
-            Stripped concatenation of all segment texts.
+            ``(text, language, language_probability)`` tuple where *text* is
+            the stripped concatenation of all segment texts (empty string when
+            no speech is detected), *language* is the Whisper-detected code,
+            and *language_probability* is the detection confidence in [0, 1].
         """
         segments, info = self._model.transcribe(
             audio,
-            language=self._language,
+            language=language if language is not None else self._language,
             beam_size=self._beam_size,
         )
         text = "".join(seg.text for seg in segments).strip()
-        self._detected_language = info.language
 
         logger.info(
             "STT | lang=%s (%.0f%%) | duration=%.2fs | text=%r",
@@ -141,4 +194,4 @@ class Transcriber:
             text,
         )
 
-        return text
+        return text, info.language, info.language_probability

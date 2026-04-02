@@ -233,43 +233,26 @@ class AudioManager:
     # ------------------------------------------------------------------
 
     def _apply_volume(self) -> None:
-        """Set ALSA PCM playback volume for the output device if configured.
+        """Set playback volume via PulseAudio if configured.
 
-        Uses ``amixer`` to find the correct ALSA card number by matching the
-        output device name, then sets numid=5 (PCM Playback Volume).
+        Uses ``pactl set-sink-volume @DEFAULT_SINK@`` so that volume control
+        works regardless of which ALSA card the Poly Sync 20 is enumerated as.
         Logs a warning and continues silently on failure.
         """
         if self._volume_percent is None:
             return
 
         log = logging.getLogger(__name__)
-
-        # Find ALSA card number from sounddevice device info
-        card_num: int | None = None
-        for dev_info in sd.query_devices():
-            if self._output_device in dev_info["name"]:
-                # Extract hw:N from device name, e.g. "Poly Sync 20: USB Audio (hw:1,0)"
-                name: str = dev_info["name"]
-                if "hw:" in name:
-                    hw_part = name.split("hw:")[1].split(",")[0].rstrip(")")
-                    card_num = int(hw_part)
-                break
-
-        if card_num is None:
-            log.warning("Cannot find ALSA card for '%s'; skipping volume set", self._output_device)
-            return
-
-        # Convert percent (0-100) → ALSA value (0-20)
-        alsa_val = max(0, min(20, round(self._volume_percent * 20 / 100)))
         try:
             subprocess.run(
-                ["amixer", "-c", str(card_num), "cset", "numid=5", str(alsa_val)],
+                ["pactl", "set-sink-volume", "@DEFAULT_SINK@",
+                 f"{self._volume_percent}%"],
                 capture_output=True, text=True, timeout=5, check=True,
             )
-            log.info("ALSA volume set to %d/20 (%d%%) on card %d",
-                     alsa_val, self._volume_percent, card_num)
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            log.warning("Failed to set ALSA volume: %s", exc)
+            log.info("PulseAudio sink volume set to %d%%", self._volume_percent)
+        except (subprocess.CalledProcessError, FileNotFoundError,
+                subprocess.TimeoutExpired) as exc:
+            log.warning("Failed to set PulseAudio volume: %s", exc)
 
     async def start(self) -> None:
         """Open and start the microphone input stream."""
@@ -338,6 +321,26 @@ class AudioManager:
         finally:
             self._playing = False
 
+    def _resolve_output_device(self) -> str | int:
+        """Return the best available output device for the configured name.
+
+        sounddevice raises ``ValueError`` when the configured device name is
+        not in PortAudio's current enumeration (e.g. after a USB reset).
+        This helper does an explicit substring scan so we can fall back to
+        ``"default"`` gracefully instead of crashing.
+        """
+        log = logging.getLogger(__name__)
+        name = self._output_device
+        if name in ("default", ""):
+            return name
+        for i, dev in enumerate(sd.query_devices()):
+            if name in dev["name"] and dev["max_output_channels"] > 0:
+                return i
+        log.warning(
+            "Output device '%s' not found in current enumeration; using 'default'", name
+        )
+        return "default"
+
     def _play_blocking(self, prepared: np.ndarray) -> None:
         """Play *prepared* audio using an explicit OutputStream.
 
@@ -377,10 +380,11 @@ class AudioManager:
                 outdata[:] = chunk
                 pos = end
 
+            device = self._resolve_output_device()
             stream = sd.OutputStream(
                 samplerate=self._output_rate,
                 channels=self._output_channels,
-                device=self._output_device,
+                device=device,
                 dtype="float32",
                 callback=_callback,
             )

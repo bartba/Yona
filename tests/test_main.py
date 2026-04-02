@@ -187,11 +187,53 @@ class TestGoodbyeRegex:
     """Verify _GOODBYE_RE matches expected patterns."""
 
     @pytest.mark.parametrize("text", [
+        # Legacy (no name)
         "바이바이",
         "bye bye",
         "bye-bye",
         "byebye",
         "Bye Bye",
+        # Korean + name: 바이바이/빠이빠이 계열 (공백 포함/미포함)
+        "바이바이 맥",
+        "바이바이맥",
+        "바이 바이 맥",
+        "빠이빠이 맥",
+        "빠이 빠이 맥",
+        # Korean + name: 굿/굳 + 바/빠 조합 (받침 ㅅ↔ㄷ, 된소리 변형)
+        "굿바이 맥",
+        "굳바이 맥",
+        "굿빠이 맥",
+        "굳빠이 맥",
+        # Korean + name: 음절 사이 공백 허용
+        "굿 바이 맥",
+        "굳 빠이 맥",
+        "굿 바이맥",
+        # Korean + name: STT 오인식 변형 (멕)
+        "굿바이 멕",
+        "굳바이 멕",
+        "바이바이 멕",
+        # English + name: 정확 (mack)
+        "bye bye mack",
+        "Bye Bye Mack",
+        "goodbye mack",
+        "good bye mack",
+        "good-bye mack",
+        "Goodbye Mack",
+        # English + name: STT 구두점 삽입 변형
+        "Goodbye, Mac.",
+        "Goodbye, Mack.",
+        "bye bye, mac",
+        "Good bye. Mac",
+        # English + name: Mack→Meg STT 오인식
+        "Bye-bye, Meg.",
+        "goodbye meg",
+        "bye bye meg",
+        # English + name: STT 오인식 변형 (mac, man)
+        "bye bye mac",
+        "goodbye mac",
+        "bye bye man",
+        "goodbye man",
+        "Bye Bye Man",
     ])
     def test_matches_goodbye(self, text: str) -> None:
         assert _GOODBYE_RE.search(text) is not None
@@ -204,8 +246,11 @@ class TestGoodbyeRegex:
         "오늘 날씨 어때",
         "bye",
         "goodbye",
+        "goodbye everyone",
         "종료",
         "그만",
+        "맥 알려줘",
+        "굿바이",        # 이름 없는 굿바이 — 오발동 방지
     ])
     def test_non_goodbye(self, text: str) -> None:
         assert _GOODBYE_RE.search(text) is None
@@ -433,6 +478,24 @@ class TestProcessUtterance:
         assert app._sm.state == CS.IDLE
         app._vad.reset.assert_called()
         app._wake.reset.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_goodbye_uses_last_conversation_lang(self, app: YonaApp) -> None:
+        """Farewell TTS uses last conversation language, not farewell STT language."""
+        app._sm._state = CS.PROCESSING
+        # Previous conversation was in Korean
+        app._last_conversation_lang = "ko"
+        # But farewell is detected as English by STT
+        app._stt.transcribe = AsyncMock(return_value="Goodbye, Mac.")
+        app._stt.detected_language = "en"
+
+        await app._process_utterance()
+
+        app._pipeline.run.assert_not_awaited()
+        # Should synthesize Korean goodbye message
+        synthesize_call_args = app._synth.synthesize.call_args[0][0]
+        goodbye_messages = app._cfg.get("conversation.goodbye_message", {})
+        assert synthesize_call_args == goodbye_messages.get("ko")
 
     @pytest.mark.asyncio
     async def test_goodbye_clears_context(self, app: YonaApp) -> None:

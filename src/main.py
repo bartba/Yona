@@ -38,8 +38,19 @@ from src.wake import WakeWordDetector
 logger = logging.getLogger(__name__)
 
 # Goodbye intent patterns (Korean + English)
+# Triggered by "bye bye Mack" / "goodbye Mack" style phrases.
+# Korean + name variants:
+#   굿/굳 (받침 ㅅ↔ㄷ 동음) + 바/빠 (된소리 변형) + 이 + 맥/막/맨 — 음절 사이 공백 허용
+#   바이바이/빠이빠이 + 맥/막/맨
+#   name: 맥(Mack), 멕(STT 오인식 변형)
+# English + name variants: bye bye mack/mac/meg/man, goodbye mack/mac/meg/man
+#   name: mack(정확), mac/meg/man(STT 오인식 변형 — meg: Mack→Meg 오인식)
+# Legacy (no name): 바이바이, bye bye  — kept for backward compat
 _GOODBYE_RE = re.compile(
-    r"바이바이|\bbye[\s\-]?bye\b",
+    r"(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:맥|멕)"  # Korean + name
+    r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]+(?:mack|mac|meg|man)\b"  # English + name
+    r"|바이바이"  # Legacy Korean (no name)
+    r"|\bbye[\s\-]?bye\b",  # Legacy English (no name)
     re.IGNORECASE,
 )
 
@@ -62,6 +73,12 @@ class YonaApp:
         self._timeout_task: asyncio.Task | None = None # 사용자가 말하면 취소하고 다시 시작(리셋), 대화별로 생성/취소
         self._process_task: asyncio.Task | None = None # 발화 하나당 한번 생성(STT->LLM->TTS), 발화별로 생성/취소
         self._handler_tasks: list[asyncio.Task] = []   # 앱이 실행되는 동안 살아있는 리스너들 (묶어서 처리)
+
+        # Language of the last completed conversation turn.
+        # Used for farewell TTS so the goodbye message matches the
+        # conversation language rather than the farewell utterance language
+        # (farewell words are almost always detected as English by STT).
+        self._last_conversation_lang: str = "ko"
 
         # Timeout settings
         self._timeout_check_sec: float = cfg.get(
@@ -279,9 +296,9 @@ class YonaApp:
             logger.info("User [%s]: %s", lang, text)
             print(f"\nUser: {text}")
 
-            # Goodbye intent
+            # Goodbye intent — use last conversation language, not farewell's STT language
             if _GOODBYE_RE.search(text):
-                await self._handle_goodbye(lang)
+                await self._handle_goodbye(self._last_conversation_lang)
                 return
 
             # Add user message to context
@@ -304,6 +321,7 @@ class YonaApp:
             if response:
                 self._context.add_assistant(response)
                 self._history.append_turn(text, response)
+                self._last_conversation_lang = lang
                 print(f"Assistant: {response}")
                 logger.info("Assistant [%s]: %s", lang, response[:100])
             else:

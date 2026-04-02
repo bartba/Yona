@@ -3,7 +3,7 @@
 
 audio:
   input_device: "Poly Sync 20"     # USB direct (hw:0,0) — lower latency than BT600 (hw:1,0)
-  output_device: "Poly Sync 20"
+  output_device: "default"          # PulseAudio default sink → Poly Sync 20 (avoids hw: conflict)
   input_sample_rate: 16000         # Hz — required by Porcupine & Whisper
   output_sample_rate: 48000        # Hz — upsampled from TTS output before playback
   input_channels: 1                # confirmed: Sync 20 Plus DSP delivers mono (beamforming+AEC done in HW)
@@ -11,7 +11,7 @@ audio:
   chunk_size: 512                  # samples/callback = 32 ms @ 16 kHz; matches Porcupine frame_length
   buffer_seconds: 30               # ring-buffer = ~1.9 MB; holds the longest expected utterance
   chime_path: null                                   # null = generate 0.3s bell chime programmatically
-  volume_percent: 80               # ALSA PCM playback volume (0-100%); null = don't touch
+  volume_percent: 70               # ALSA PCM playback volume (0-100%); null = don't touch
 
 wake_word:
   wake_phrase: "Hey Mack"              # display phrase (what the user says); used in logs and test prompts
@@ -29,7 +29,7 @@ vad:
   threshold: 0.5                   # speech probability cutoff (LISTENING)
   silence_duration: 1.2            # seconds of silence to end a speech segment (0.8 was too short for Korean pauses)
   min_speech_duration: 0.3         # minimum speech length to accept
-  barge_in_threshold: 0.7          # higher threshold during SPEAKING (AEC residual)
+  barge_in_threshold: 0.95          # higher threshold during SPEAKING (AEC residual)
 
 stt:
   model_size: "large-v3-turbo"
@@ -38,6 +38,7 @@ stt:
   beam_size: 3                     # beam search (1=greedy, 5=max; 3 balances accuracy vs Jetson 8GB memory)
   language: null                   # null = auto-detect; set e.g. "ko" to force a fixed language
   allowed_languages: [ko, en]      # restrict auto-detection to these languages; first = fallback
+  lang_recheck_min_prob: 0.3       # min language_probability to accept a forced-language recheck result
 
 llm:
   # Provider selection: "openai" , "claude" or "custom"
