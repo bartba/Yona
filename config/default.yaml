@@ -11,7 +11,7 @@ audio:
   chunk_size: 512                  # samples/callback = 32 ms @ 16 kHz; matches Porcupine frame_length
   buffer_seconds: 30               # ring-buffer = ~1.9 MB; holds the longest expected utterance
   chime_path: null                                   # null = generate 0.3s bell chime programmatically
-  volume_percent: 70               # ALSA PCM playback volume (0-100%); null = don't touch
+  volume_percent: 95               # ALSA PCM playback volume (0-100%); null = don't touch
 
 wake_word:
   wake_phrase: "Hey Mack"              # display phrase (what the user says); used in logs and test prompts
@@ -61,7 +61,9 @@ llm:
 
   # --- Common ---
   max_tokens: 1024
-  temperature: 1.0                 # gpt-5-mini 등 신형 모델은 1.0(기본값)만 허용; OpenAI는 1.0이면 파라미터 생략
+  temperature: 1.0                 # OpenAI: 신형 모델(o-series, gpt-5-mini 등)은 1.0 필수 → 1.0이면 파라미터 생략
+  claude_temperature: 0.7          # Claude: API 허용 범위 0.0-1.0; 음성 어시스턴트 권장값 0.7
+  custom_temperature: 0.7          # Custom(Samsung Gauss): 모델 의존적; 음성 어시스턴트 권장값 0.7
   max_context_tokens: 3000        # compress history when estimated token count exceeds this
 
 tts:
@@ -105,3 +107,8 @@ logging:
   file: "logs/yona.log"
   max_bytes: 10485760              # 10 MB
   backup_count: 5
+
+web:
+  enabled: true
+  host: "0.0.0.0"                 # LAN 접근 허용 (Jetson에 모니터 없는 환경)
+  port: 8080

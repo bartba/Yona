@@ -567,7 +567,8 @@ class TestProcessingChime:
     def test_generate_proc_chime_correct_length(self):
         sr = 24_000
         chime = ChimePlayer._generate_proc_chime(sr)
-        expected = int(sr * 0.15)
+        # Two notes (0.08 s + 0.12 s) + gap (0.022 s)
+        expected = int(sr * 0.08) + int(sr * 0.022) + int(sr * 0.12)
         assert len(chime) == expected
 
     def test_generate_proc_chime_not_silent(self):

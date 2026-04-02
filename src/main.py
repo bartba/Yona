@@ -73,6 +73,8 @@ class YonaApp:
         self._timeout_task: asyncio.Task | None = None # 사용자가 말하면 취소하고 다시 시작(리셋), 대화별로 생성/취소
         self._process_task: asyncio.Task | None = None # 발화 하나당 한번 생성(STT->LLM->TTS), 발화별로 생성/취소
         self._handler_tasks: list[asyncio.Task] = []   # 앱이 실행되는 동안 살아있는 리스너들 (묶어서 처리)
+        self._web = None  # WebServer instance (optional)
+        self._web_task: asyncio.Task | None = None
 
         # Language of the last completed conversation turn.
         # Used for farewell TTS so the goodbye message matches the
@@ -263,8 +265,11 @@ class YonaApp:
     # ------------------------------------------------------------------
 
     async def _process_utterance(self) -> None:
-        """STT → goodbye check → LLM+TTS pipeline → back to LISTENING."""
-        """사용자가 말을 끝낸 순간(SPEECH_ENDED)부터 시작, assistant가 대답을 끝내고 다시 듣기 시작하는 순간까지의 모든것 처리"""
+        """STT → goodbye check → LLM+TTS pipeline → back to LISTENING.
+
+        사용자가 말을 끝낸 순간(SPEECH_ENDED)부터 시작,
+        assistant가 대답을 끝내고 다시 듣기 시작하는 순간까지의 모든것 처리.
+        """
         t_start = time.monotonic()
         try:
             audio = self._buffer.get_all()
@@ -295,6 +300,7 @@ class YonaApp:
 
             logger.info("User [%s]: %s", lang, text)
             print(f"\nUser: {text}")
+            self._bus.publish_nowait(EventType.TRANSCRIPTION_READY, text)
 
             # Goodbye intent — use last conversation language, not farewell's STT language
             if _GOODBYE_RE.search(text):
@@ -374,9 +380,11 @@ class YonaApp:
         messages = self._cfg.get("conversation.goodbye_message", {})
         msg = messages.get(lang, messages.get("ko", "안녕히 계세요!"))
 
-        # Play farewell via TTS
+        # Play farewell via TTS — publish PHRASE_PLAYING so web UI shows the text
         await self._sm.transition(CS.SPEAKING)
+        self._bus.publish_nowait(EventType.PHRASE_PLAYING, msg)
         await self._play_tts(msg)
+        await self._bus.publish(EventType.PLAYBACK_DONE)
 
         # Clear context and return to IDLE
         self._context.clear()
@@ -549,6 +557,14 @@ class YonaApp:
     async def run(self) -> None:
         """Start all components and run the main event loop."""
         self._bus.set_loop(asyncio.get_running_loop())
+
+        # Start web UI before model loading so the browser shows IDLE immediately
+        if self._cfg.get("web.enabled", False):
+            from src.web import WebServer
+            self._web = WebServer(self._cfg, self._bus)
+            self._web_task = asyncio.create_task(self._web.serve())
+            logger.info("Web UI task started")
+
         await self._init_components()
 
         # Register audio callback and start the mic stream
@@ -599,6 +615,7 @@ class YonaApp:
         # Cancel processing task
         if self._process_task and not self._process_task.done():
             self._process_task.cancel()
+            await asyncio.gather(self._process_task, return_exceptions=True)
 
         # Cancel event handler tasks
         for task in self._handler_tasks:
@@ -606,6 +623,16 @@ class YonaApp:
         if self._handler_tasks:
             await asyncio.gather(*self._handler_tasks, return_exceptions=True)
             self._handler_tasks.clear()
+
+        # Stop web UI — set should_exit and wait for uvicorn to finish gracefully
+        if self._web:
+            await self._web.shutdown()
+        if self._web_task and not self._web_task.done():
+            try:
+                await asyncio.wait_for(self._web_task, timeout=3.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                self._web_task.cancel()
+                await asyncio.gather(self._web_task, return_exceptions=True)
 
         # Stop pipeline
         if self._pipeline:

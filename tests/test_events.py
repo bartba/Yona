@@ -21,7 +21,7 @@ from src.events import Event, EventBus, EventType
 
 class TestEventType:
     def test_has_exactly_18_members(self):
-        assert len(EventType) == 18
+        assert len(EventType) == 19
 
     def test_all_members_are_unique(self):
         values = [e.value for e in EventType]
@@ -39,6 +39,7 @@ class TestEventType:
             "LLM_RESPONSE_CHUNK",
             "LLM_RESPONSE_DONE",
             "PHRASE_READY",
+            "PHRASE_PLAYING",
             "AUDIO_CHUNK_READY",
             "PLAYBACK_STARTED",
             "PLAYBACK_DONE",

@@ -389,7 +389,8 @@ class ClaudeChatHandler:
         self._bus = bus
         self._model: str = cfg.get("llm.claude_model", "claude-sonnet-4-6")
         self._max_tokens: int = cfg.get("llm.max_tokens", 1024)
-        self._temperature: float = cfg.get("llm.temperature", 0.7)
+        # claude_temperature 우선; 없으면 공통 temperature 사용 (단 Claude는 1.0 제약 없음)
+        self._temperature: float = cfg.get("llm.claude_temperature", cfg.get("llm.temperature", 0.7))
         import httpx as _httpx
 
         self._client = anthropic.AsyncAnthropic(
@@ -410,6 +411,7 @@ class ClaudeChatHandler:
             system=context.system_prompt,
             messages=messages,  # type: ignore[arg-type]
             max_tokens=self._max_tokens,
+            temperature=self._temperature,
         ) as stream_cm:
             async for token in stream_cm.text_stream:
                 if token:
@@ -453,7 +455,8 @@ class CustomLLMChatHandler:
         self._url: str = cfg.get("llm.custom_url", "")
         self._model_id: str = cfg.get("llm.custom_model_id", "")
         self._max_tokens: int = cfg.get("llm.max_tokens", 1024)
-        self._temperature: float = cfg.get("llm.temperature", 0.7)
+        # custom_temperature 우선; 없으면 공통 temperature 사용
+        self._temperature: float = cfg.get("llm.custom_temperature", cfg.get("llm.temperature", 0.7))
 
         headers: dict[str, str] = {
             "Content-Type": "application/json",

@@ -237,7 +237,7 @@ class StreamingPipeline:
             lang_task = None
 
         phrase_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=5)
-        audio_queue: asyncio.Queue[tuple[np.ndarray, int] | None] = asyncio.Queue(maxsize=10)
+        audio_queue: asyncio.Queue[tuple[np.ndarray, int, str] | None] = asyncio.Queue(maxsize=10)
 
         self._tasks = [
             asyncio.create_task(self._llm_worker(context, phrase_queue, detected_language)),
@@ -332,7 +332,7 @@ class StreamingPipeline:
     async def _tts_worker(
         self,
         phrase_queue: asyncio.Queue[str | None],
-        audio_queue: asyncio.Queue[tuple[np.ndarray, int] | None],
+        audio_queue: asyncio.Queue[tuple[np.ndarray, int, str] | None],
     ) -> None:
         """Read phrases → synthesize audio → audio_queue.
 
@@ -364,7 +364,7 @@ class StreamingPipeline:
                     await self._bus.publish(
                         EventType.AUDIO_CHUNK_READY, data=(audio, sr),
                     )
-                    await audio_queue.put((audio, sr))
+                    await audio_queue.put((audio, sr, phrase))
                 except Exception as exc:
                     logger.error("TTS error for phrase %r: %s", phrase[:30], exc)
                     await self._bus.publish(EventType.ERROR, data=exc)
@@ -375,7 +375,7 @@ class StreamingPipeline:
 
     async def _playback_worker(
         self,
-        audio_queue: asyncio.Queue[tuple[np.ndarray, int] | None],
+        audio_queue: asyncio.Queue[tuple[np.ndarray, int, str] | None],
     ) -> None:
         """Read audio chunks → play via AudioManager."""
         await self._bus.publish(EventType.PLAYBACK_STARTED)
@@ -387,12 +387,13 @@ class StreamingPipeline:
                 wait_dur = time.monotonic() - t_wait
                 if item is None or self._interrupted.is_set():
                     break
-                audio, sr = item
+                audio, sr, phrase_text = item
                 audio_dur = len(audio) / sr
                 logger.info(
                     "Playback[%d] start: waited=%.2fs audio=%.2fs",
                     idx, wait_dur, audio_dur,
                 )
+                await self._bus.publish(EventType.PHRASE_PLAYING, data=phrase_text)
                 t0 = time.monotonic()
                 await self._audio.play_audio(audio, sr)
                 play_dur = time.monotonic() - t0

@@ -41,6 +41,7 @@ class EventType(Enum):
     LLM_RESPONSE_CHUNK   = auto() # One streamed token; data = str
     LLM_RESPONSE_DONE    = auto() # LLM streaming finished
     PHRASE_READY         = auto() # PhraseAccumulator emitted phrase; data = str
+    PHRASE_PLAYING       = auto() # Phrase audio about to play; data = str (phrase text)
     AUDIO_CHUNK_READY    = auto() # TTS produced audio; data = (np.ndarray, int sr)
 
     # --- Playback ---

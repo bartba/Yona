@@ -433,7 +433,7 @@ def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
     Uses linear interpolation (numpy.interp).  Handles arbitrary integer and
     non-integer ratios.  Output length is
     ``ceil(len(audio) * to_rate / from_rate)`` samples.
-    마이크 입력 : 16kHz, XTTS 출력 : 24KHz, 스피커 출력 :48kHz
+    마이크 입력 : 16kHz, Supertonic 출력 : 44.1kHz, 스피커 출력 : 48kHz
 
     Args:
         audio:     1-D float32 array.
@@ -540,20 +540,31 @@ class ChimePlayer:
 
     @staticmethod
     def _generate_proc_chime(sample_rate: int) -> np.ndarray:
-        """Generate a short descending two-tone chime (0.15 s).
+        """Generate a light two-note ascending chime (~0.22 s).
 
-        Plays a quick 880→660 Hz glide to signal "I heard you, processing
-        now".  Kept very short so it doesn't delay STT start noticeably.
+        E5 (659 Hz) → G#5 (831 Hz) — 장3도 상승 인터벌.
+        상승 음정 + 2배음으로 경쾌하고 밝은 알림음 느낌.
         """
-        dur = 0.15
-        n = int(sample_rate * dur)
-        t = np.linspace(0.0, dur, n, endpoint=False)
-        # Frequency glides from 880 Hz down to 660 Hz (A5 → E5)
-        freq = 880.0 - (880.0 - 660.0) * (t / dur)
-        phase = np.cumsum(2.0 * math.pi * freq / sample_rate)
-        envelope = np.exp(-6.0 * t)  # fast decay
-        wave = 0.5 * envelope * np.sin(phase)
-        return wave.astype(np.float32)
+        def _ping(freq: float, dur: float, decay: float) -> np.ndarray:
+            n = int(sample_rate * dur)
+            t = np.linspace(0.0, dur, n, endpoint=False)
+            envelope = np.exp(-decay * t)
+            # 기본음 + 약한 2배음으로 밝은 음색
+            wave = envelope * (
+                0.70 * np.sin(2.0 * math.pi * freq * t)
+                + 0.12 * np.sin(2.0 * math.pi * freq * 2.0 * t)
+            )
+            return wave.astype(np.float32)
+
+        note1 = _ping(659.0, 0.08, 28.0)   # E5 — 짧고 경쾌하게
+        gap   = np.zeros(int(sample_rate * 0.022), dtype=np.float32)
+        note2 = _ping(831.0, 0.12, 20.0)   # G#5 — 약간 길게 여운
+
+        combined = np.concatenate([note1, gap, note2])
+        peak = np.abs(combined).max()
+        if peak > 0:
+            combined = combined / peak * 0.62
+        return combined
 
     @staticmethod
     def _load_wav(path: str) -> tuple[np.ndarray, int]:
