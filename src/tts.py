@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Text preprocessing for TTS
 # ---------------------------------------------------------------------------
 
-_MARKDOWN_RE = re.compile(r"[*#_~`\[\]{}|\\]")
+_MARKDOWN_RE = re.compile(r"[*#_~`\[\]{}|\\·•◦‧⋅∙]")
 _FANCY_QUOTES_RE = re.compile(r"[\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b]")
 _DASH_RE = re.compile(r"\s*[\u2014\u2013]\s*")  # em-dash, en-dash → comma
 # L-O-V-E → LOVE (single-letter segments only; keeps "well-known")
@@ -128,15 +128,20 @@ class SupertonicSynthesizer:
 
         voice_name: str = cfg.get("tts.voice", "M1")
 
-        self._tts = SupertonicTTS()
+        intra = cfg.get("tts.ort_intra_threads", None)
+        inter = cfg.get("tts.ort_inter_threads", None)
+        self._tts = SupertonicTTS(
+            intra_op_num_threads=intra,
+            inter_op_num_threads=inter,
+        )
         self._sample_rate: int = self._tts.sample_rate  # 44100
         self._voice_style = self._tts.get_voice_style(voice_name)
 
         logger.info(
             "SupertonicSynthesizer ready | lang=%s voice=%s speed=%.2f "
-            "steps=%d sr=%d voices=%s",
+            "steps=%d sr=%d ort_intra=%s ort_inter=%s voices=%s",
             self._language, voice_name, self._speed,
-            self._total_steps, self._sample_rate,
+            self._total_steps, self._sample_rate, intra, inter,
             self._tts.voice_style_names,
         )
 

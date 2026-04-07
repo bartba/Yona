@@ -40,6 +40,7 @@ import logging
 import math
 import subprocess
 import threading
+import time
 from typing import Callable
 
 import numpy as np
@@ -380,23 +381,55 @@ class AudioManager:
                 outdata[:] = chunk
                 pos = end
 
+            # Audio duration in seconds — used to compute the drain wait below.
+            audio_dur = len(prepared) / self._output_rate
+
             device = self._resolve_output_device()
             stream = sd.OutputStream(
                 samplerate=self._output_rate,
                 channels=self._output_channels,
                 device=device,
                 dtype="float32",
+                latency=0.2,
                 callback=_callback,
             )
             self._output_stream = stream
             try:
                 stream.start()
+                # t_running is recorded AFTER stream.start() so that
+                # stream initialisation time (ALSA/PulseAudio device open,
+                # which can take 50-300 ms under load) is excluded from the
+                # drain-wait calculation.  If t_start were recorded before
+                # stream.start(), a slow initialisation would inflate
+                # `elapsed` and shrink (or negate) `remaining`, causing the
+                # stream to be stopped before ALSA drains its buffer —
+                # leading to a silent or truncated chime.
+                t_running = time.monotonic()
+
                 # Poll instead of blocking forever — when stop_playback()
                 # calls stream.stop() externally the callback never sets
                 # `done`, so an unbounded wait deadlocks _playback_lock.
                 while not done.wait(timeout=0.05):
                     if not stream.active:
                         break
+                # Normal completion: wait for ALSA to drain remaining buffer.
+                # With latency=0.2, PortAudio pre-fills the buffer ahead of
+                # actual playback, so done.set() fires before the hardware
+                # finishes.  Compute remaining = audio_dur - elapsed so that
+                # both short clips (chimes) and long phrases drain fully.
+                # Barge-in sets stream inactive without setting done → skip.
+                if done.is_set():
+                    elapsed = time.monotonic() - t_running
+                    # Add the stream latency (0.2 s) to the drain wait.
+                    # With latency=0.2, PortAudio pre-buffers audio 200 ms
+                    # ahead of actual playback, so done.set() fires when the
+                    # last chunk has been fed to the buffer — not when the
+                    # speaker has finished playing it.  Without the +0.2 offset
+                    # stream.stop() discards the buffered tail, silencing short
+                    # clips like the wake-word chime.
+                    remaining = audio_dur - elapsed + 0.2
+                    if remaining > 0:
+                        time.sleep(remaining)
                 stream.stop()
             except sd.PortAudioError:
                 pass  # stream was stopped externally (barge-in)
@@ -487,7 +520,6 @@ class ChimePlayer:
             self._audio, self._sample_rate = self._load_wav(chime_path)
         else:
             self._audio = self._generate_chime(self._CHIME_SAMPLE_RATE)
-        self._proc_audio = self._generate_proc_chime(self._CHIME_SAMPLE_RATE)
 
     # ------------------------------------------------------------------
     # Public API
@@ -496,20 +528,6 @@ class ChimePlayer:
     async def play(self) -> None:
         """Play the wake-word chime via the shared AudioManager."""
         await self._manager.play_audio(self._audio, self._sample_rate)
-
-    async def play_processing(self) -> None:
-        """Play a short descending chime to signal processing has started.
-
-        Non-critical — if the audio device is still busy (e.g. after a
-        barge-in), the chime is silently skipped so STT processing can
-        proceed.
-        """
-        try:
-            await self._manager.play_audio(self._proc_audio, self._sample_rate)
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Processing chime skipped (device busy)"
-            )
 
     # ------------------------------------------------------------------
     # Chime generation
@@ -538,33 +556,6 @@ class ChimePlayer:
 
         return wave.astype(np.float32)
 
-    @staticmethod
-    def _generate_proc_chime(sample_rate: int) -> np.ndarray:
-        """Generate a light two-note ascending chime (~0.22 s).
-
-        E5 (659 Hz) → G#5 (831 Hz) — 장3도 상승 인터벌.
-        상승 음정 + 2배음으로 경쾌하고 밝은 알림음 느낌.
-        """
-        def _ping(freq: float, dur: float, decay: float) -> np.ndarray:
-            n = int(sample_rate * dur)
-            t = np.linspace(0.0, dur, n, endpoint=False)
-            envelope = np.exp(-decay * t)
-            # 기본음 + 약한 2배음으로 밝은 음색
-            wave = envelope * (
-                0.70 * np.sin(2.0 * math.pi * freq * t)
-                + 0.12 * np.sin(2.0 * math.pi * freq * 2.0 * t)
-            )
-            return wave.astype(np.float32)
-
-        note1 = _ping(659.0, 0.08, 28.0)   # E5 — 짧고 경쾌하게
-        gap   = np.zeros(int(sample_rate * 0.022), dtype=np.float32)
-        note2 = _ping(831.0, 0.12, 20.0)   # G#5 — 약간 길게 여운
-
-        combined = np.concatenate([note1, gap, note2])
-        peak = np.abs(combined).max()
-        if peak > 0:
-            combined = combined / peak * 0.62
-        return combined
 
     @staticmethod
     def _load_wav(path: str) -> tuple[np.ndarray, int]:

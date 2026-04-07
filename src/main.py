@@ -37,18 +37,22 @@ from src.wake import WakeWordDetector
 
 logger = logging.getLogger(__name__)
 
-# Goodbye intent patterns (Korean + English)
-# Triggered by "bye bye Mack" / "goodbye Mack" style phrases.
-# Korean + name variants:
+# Goodbye intent patterns (Korean + English, including mixed cases)
+# Triggered by "bye bye Mack" / "goodbye Mack" / "바이 바이 Mac" style phrases.
+# Korean farewell + Korean name:
 #   굿/굳 (받침 ㅅ↔ㄷ 동음) + 바/빠 (된소리 변형) + 이 + 맥/막/맨 — 음절 사이 공백 허용
 #   바이바이/빠이빠이 + 맥/막/맨
 #   name: 맥(Mack), 멕(STT 오인식 변형)
-# English + name variants: bye bye mack/mac/meg/man, goodbye mack/mac/meg/man
+# Korean farewell + English name (mixed): 바이 바이 Mac/Mack, 빠이빠이 mac
+# English farewell + English name: bye bye mack/mac/meg/man, goodbye mack/mac/meg/man
 #   name: mack(정확), mac/meg/man(STT 오인식 변형 — meg: Mack→Meg 오인식)
+# English farewell + Korean name (mixed): bye bye 맥, goodbye 맥/멕
 # Legacy (no name): 바이바이, bye bye  — kept for backward compat
 _GOODBYE_RE = re.compile(
-    r"(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:맥|멕)"  # Korean + name
-    r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]+(?:mack|mac|meg|man)\b"  # English + name
+    r"(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:맥|멕)"  # Korean farewell + Korean name
+    r"|(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:mack|mac|meg|man)\b"  # Korean farewell + English name
+    r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]*(?:mack|mac|meg|man)\b"  # English farewell + English name
+    r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]*(?:맥|멕)"  # English farewell + Korean name
     r"|바이바이"  # Legacy Korean (no name)
     r"|\bbye[\s\-]?bye\b",  # Legacy English (no name)
     re.IGNORECASE,
@@ -233,12 +237,11 @@ class YonaApp:
             self._cancel_timeout()
 
     async def _on_speech_ended(self, event: Event) -> None:
-        """Speech ended → PROCESSING → chime → run STT + pipeline."""
+        """Speech ended → PROCESSING → run STT + pipeline."""
         if self._sm.state != CS.LISTENING:
             return
         self._cancel_timeout()
         await self._sm.transition(CS.PROCESSING)
-        await self._chime.play_processing()
         # Run processing in a separate task so event handlers stay responsive
         self._process_task = asyncio.create_task(self._process_utterance())
 

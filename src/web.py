@@ -283,7 +283,7 @@ _HTML_PAGE = """<!DOCTYPE html>
 <div id="conversation">
   <div id="empty">
     <div id="empty-icon">🎙️</div>
-    <div id="empty-text">"Hey Mack" 이라고 말씀하세요</div>
+    <div id="empty-text">"Hey Mac" 이라고 말씀하세요</div>
   </div>
 </div>
 
@@ -381,7 +381,7 @@ function updateEmptyState(state) {
   if (!emptyVisible) return;
   if (state === 'IDLE') {
     emptyIcon.textContent = '🎙️';
-    emptyText.textContent = '"Hey Mack" 이라고 말씀하세요';
+    emptyText.textContent = '"Hey Mac" 이라고 말씀하세요';
   } else if (state === 'LISTENING') {
     emptyIcon.textContent = '👂';
     emptyText.textContent = '말씀해 주세요...';

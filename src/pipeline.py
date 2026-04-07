@@ -169,8 +169,11 @@ class StreamingPipeline:
     #: these minimums merge them into natural-sounding chunks before
     #: TTS synthesis.  Values are set so that 2-3 short clauses merge
     #: into one TTS call (better prosody, fewer inter-phrase gaps).
-    _MIN_PHRASE_BY_LANG: dict[str, int] = {"ko": 15, "en": 30}
-    DEFAULT_MIN_PHRASE_LENGTH = 15
+    #: Increased from ko=15/en=30 since TTS RTF ≈ 0.35-0.45x at
+    #: total_steps=8 — longer phrases produce more natural prosody
+    #: while still staying comfortably ahead of playback.
+    _MIN_PHRASE_BY_LANG: dict[str, int] = {"ko": 25, "en": 50}
+    DEFAULT_MIN_PHRASE_LENGTH = 25
 
     def __init__(
         self,

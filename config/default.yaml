@@ -20,14 +20,14 @@ wake_word:
   active_models:
     - "Hey_Mack_20260309_205536"       # custom model; key = filename without .onnx
   inference_framework: "onnx"        # "onnx" or "tflite"
-  threshold: 0.5                     # score cutoff for detection (0.0-1.0)
-  patience: 1                        # consecutive frames above threshold to trigger
+  threshold: 0.35                    # score cutoff for detection (0.0-1.0); custom model 실제 score 범위에 맞춤 (was 0.5)
+  patience: 2                        # consecutive frames above threshold to trigger; 연속 96ms 이상 유지해야 발동 (was 1)
   cooldown_seconds: 2.0              # ignore re-triggers for N seconds
 
 vad:
   model_path: "models/silero_vad/silero_vad.onnx"
   threshold: 0.5                   # speech probability cutoff (LISTENING)
-  silence_duration: 1.2            # seconds of silence to end a speech segment (0.8 was too short for Korean pauses)
+  silence_duration: 1.5            # seconds of silence to end a speech segment (0.8 was too short for Korean pauses)
   min_speech_duration: 0.3         # minimum speech length to accept
   barge_in_threshold: 0.95          # higher threshold during SPEAKING (AEC residual)
 
@@ -73,8 +73,10 @@ tts:
   # --- Supertonic --- multilingual (ko, en, es, pt, fr)
   language: "ko"                   # default language (pipeline switches dynamically via STT)
   voice: "M1"                      # voice style: F1-F5 (female), M1-M5 (male)
-  speed: 1.1                       # speaking speed (0.5 slow ~ 2.0 fast); 1.25→1.1 for clarity
-  total_steps: 8                   # diffusion steps (fewer = faster, more = higher quality); 5→8 for quality
+  speed: 1.0                       # speaking speed (0.5 slow ~ 2.0 fast); 1.1→1.0 to prevent English function-word omission
+  total_steps: 8                   # diffusion steps (fewer = faster, more = higher quality); 5→8 to reduce phoneme dropout
+  ort_intra_threads: 3             # ORT intra-op threads (Jetson 6 cores → 3 for ORT, 3 for audio/system)
+  ort_inter_threads: 1             # ORT inter-op threads (1 = minimal cross-op parallelism)
 
   # --- Common ---
   output_sample_rate: 44100        # Supertonic native output rate
