@@ -53,6 +53,7 @@ _GOODBYE_RE = re.compile(
     r"|(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:mack|mac|meg|man)\b"  # Korean farewell + English name
     r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]*(?:mack|mac|meg|man)\b"  # English farewell + English name
     r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]*(?:맥|멕)"  # English farewell + Korean name
+    r"|\bbye[\s,\.]+(?:mack|mac|meg|man)\b"  # "Bye, Mac." / "Bye Mac." (single bye + name)
     r"|바이바이"  # Legacy Korean (no name)
     r"|\bbye[\s\-]?bye\b",  # Legacy English (no name)
     re.IGNORECASE,

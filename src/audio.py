@@ -428,8 +428,19 @@ class AudioManager:
                     # stream.stop() discards the buffered tail, silencing short
                     # clips like the wake-word chime.
                     remaining = audio_dur - elapsed + 0.2
-                    if remaining > 0:
-                        time.sleep(remaining)
+                    # Floor at 0.2 s (stream latency) so that stream.stop() is
+                    # never called with data still in the latency buffer.
+                    # When the PortAudio callback is delayed by GIL/GC
+                    # contention (elapsed > audio_dur + 0.2), remaining goes
+                    # negative and skipping the sleep discards the buffer —
+                    # causing a silent chime on second-session wakeups.
+                    if remaining <= 0:
+                        log.warning(
+                            "Drain margin exhausted: audio_dur=%.3fs elapsed=%.3fs "
+                            "remaining=%.3fs (GIL/GC callback starvation?)",
+                            audio_dur, elapsed, remaining,
+                        )
+                    time.sleep(max(0.2, remaining))
                 stream.stop()
             except sd.PortAudioError:
                 pass  # stream was stopped externally (barge-in)
@@ -502,6 +513,12 @@ class ChimePlayer:
 
     _CHIME_SAMPLE_RATE = 24_000   # Hz — for programmatic chime generation
     _DURATION = 0.3               # seconds — short chime for snappy UX
+    # Silence prepended to the chime to absorb the USB audio device's startup
+    # mute transient.  After a session the device enters power-saving; the next
+    # stream open triggers a ~100-400 ms hardware mute before audio appears.
+    # Without this margin the entire 0.3 s chime falls inside the mute window
+    # and is silent.  The user hears the chime after _WARMUP_DURATION seconds.
+    _WARMUP_DURATION = 0.4        # seconds of silence before audible chime
     _FREQ_BASE = 880.0            # Hz — A5 기준음
     # (ratio, amplitude, decay_rate) — 벨 배음 구조
     # ratio: 기본음 대비 배음 비율, decay: 지수 감쇠 속도 (클수록 빨리 소멸)
@@ -520,6 +537,14 @@ class ChimePlayer:
             self._audio, self._sample_rate = self._load_wav(chime_path)
         else:
             self._audio = self._generate_chime(self._CHIME_SAMPLE_RATE)
+
+        # Prepend silence so the USB device's startup mute transient passes
+        # before the audible chime begins.  Duration is configurable via
+        # audio.chime_warmup_seconds (default _WARMUP_DURATION).
+        warmup_dur: float = cfg.get("audio.chime_warmup_seconds", self._WARMUP_DURATION)
+        if warmup_dur > 0:
+            warmup = np.zeros(int(self._sample_rate * warmup_dur), dtype=np.float32)
+            self._audio = np.concatenate([warmup, self._audio])
 
     # ------------------------------------------------------------------
     # Public API
