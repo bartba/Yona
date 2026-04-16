@@ -74,9 +74,9 @@ tts:
   language: "ko"                   # default language (pipeline switches dynamically via STT)
   voice: "M1"                      # voice style: F1-F5 (female), M1-M5 (male)
   speed: 1.0                       # speaking speed (0.5 slow ~ 2.0 fast); 1.1→1.0 to prevent English function-word omission
-  total_steps: 8                   # diffusion steps (fewer = faster, more = higher quality); 5→8 to reduce phoneme dropout
-  ort_intra_threads: 3             # ORT intra-op threads (Jetson 6 cores → 3 for ORT, 3 for audio/system)
-  ort_inter_threads: 1             # ORT inter-op threads (1 = minimal cross-op parallelism)
+  total_steps: 8                   # diffusion steps (fewer = faster, more = higher quality); 
+  ort_intra_threads: 2             # ORT intra-op threads (Jetson 6 cores → 3 for ORT, 3 for audio/system)
+  ort_inter_threads: 2             # ORT inter-op threads (1 = minimal cross-op parallelism)
 
   # --- Common ---
   output_sample_rate: 44100        # Supertonic native output rate
