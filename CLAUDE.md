@@ -66,6 +66,11 @@ LISTENING/SPEAKING ──(15s)──→ TIMEOUT_CHECK ──(5s)──→ IDLE
 any ──(goodbye)──→ IDLE
 ```
 
+## Pipeline
+- Phrase-level TTS: LLM tokens → `PhraseAccumulator` → TTS → speaker
+- Min phrase length: `ko` = 30 chars, `en` = 50 chars (avoids clipped short phrases)
+- Barge-in: Silero VAD fires during SPEAKING → `pipeline.interrupt()`
+
 ## Code Conventions
 - Python 3.10+, type hints, `typing.Protocol` (no ABCs)
 - `asyncio` throughout; sounddevice callback is the only sync entry point

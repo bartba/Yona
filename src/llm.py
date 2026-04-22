@@ -7,23 +7,9 @@ Provides:
   OpenAIChatHandler   — OpenAI SDK streaming (gpt-4o-mini etc.)
   ClaudeChatHandler   — Anthropic SDK streaming (claude-*)
   CustomLLMChatHandler— httpx SSE streaming (OpenAI-compatible custom endpoint)
+  ApiChatHandler      — httpx single POST (non-streaming; yields full response once)
   create_chat_handler — factory: reads LLM_PROVIDER and returns the right handler
 
-Usage::
-
-    from src.config import Config
-    from src.events import EventBus
-    from src.llm import ConversationContext, ConversationHistory, create_chat_handler
-
-    handler = create_chat_handler(cfg, bus)
-    context = ConversationContext(system_prompt, max_context_tokens=3000)
-    context.add_user("안녕하세요!")
-
-    async for token in handler.stream(context):
-        print(token, end="", flush=True)
-
-    context.add_assistant(full_response)
-    await handler.close()
 """
 
 from __future__ import annotations
@@ -191,10 +177,13 @@ class ConversationContext:
     # ------------------------------------------------------------------
 
     def _trim(self) -> None:
-        """Hard safety net — discard oldest pairs if token budget is exceeded by 10%."""
+        """Hard safety net — discard oldest messages until under the ceiling,
+        always leaving a leading 'user' turn (required by Claude API)."""
         ceiling = int(self._max_tokens * 1.1)
         while self.history_tokens > ceiling and len(self._messages) >= 2:
-            self._messages = self._messages[2:]  # drop oldest user+assistant pair
+            self._messages = self._messages[2:]
+        while self._messages and self._messages[0]["role"] != "user":
+            self._messages = self._messages[1:]
 
 
 # ---------------------------------------------------------------------------
@@ -202,18 +191,21 @@ class ConversationContext:
 # ---------------------------------------------------------------------------
 
 class ConversationHistory:
-    """Persistent daily JSON conversation history.
+    """Persistent daily JSONL conversation history.
 
-    Each calendar day gets its own file ``YYYY-MM-DD.json`` in *storage_dir*.
-    Each file is a JSON array of turn objects::
+    Each calendar day gets its own file ``YYYY-MM-DD.jsonl`` in *storage_dir*.
+    Each line is a self-contained JSON object (one turn)::
 
-        [{"user": "...", "assistant": "...", "ts": "2026-03-12T09:23:11"}]
+        {"user": "...", "assistant": "...", "ts": "2026-03-12T09:23:11"}
 
-    Files older than *max_days* are deleted automatically when a new turn
-    is appended.
+    JSONL is append-only: each turn costs a single ``fh.write`` with no
+    read-back, giving O(1) I/O per turn regardless of session length and
+    eliminating eMMC write amplification from full-file rewrites.
+
+    Files older than *max_days* are deleted at startup via :meth:`purge_old`.
 
     Args:
-        storage_dir: Directory path for JSON files (created if missing).
+        storage_dir: Directory path for JSONL files (created if missing).
         max_days:    How many days of history to retain (default: 365 = 1 year).
     """
 
@@ -227,50 +219,41 @@ class ConversationHistory:
     # ------------------------------------------------------------------
 
     def append_turn(self, user: str, assistant: str) -> None:
-        """Persist a completed turn to today's JSON file.
+        """Persist a completed turn to today's JSONL file (O(1) append).
 
         Does not trigger pruning — call :meth:`purge_old` once at app startup.
         """
-        day_key = self._day_key()
-        fpath = self._day_file(day_key)
-
-        turns: list[dict[str, Any]] = []
-        if fpath.exists():
-            try:
-                turns = json.loads(fpath.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                turns = []
-
-        turns.append({
-            "user": user,
-            "assistant": assistant,
-            "ts": datetime.now().isoformat(),
-        })
-        fpath.write_text(
-            json.dumps(turns, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        fpath = self._day_file(self._day_key())
+        line = json.dumps(
+            {"user": user, "assistant": assistant, "ts": datetime.now().isoformat()},
+            ensure_ascii=False,
         )
+        with fpath.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
     def get_recent_turns(self, max_days: int = 7) -> list[dict[str, Any]]:
         """Return all turns from the last *max_days* days, oldest first.
 
-        Turns whose ``ts`` field is before the cutoff are skipped.
-        Malformed files are silently ignored.
+        Malformed lines are silently skipped.
         """
         cutoff = datetime.now() - timedelta(days=max_days)
         results: list[dict[str, Any]] = []
 
-        for fpath in sorted(self._dir.glob("*.json")):
+        for fpath in sorted(self._dir.glob("*.jsonl")):
             try:
-                turns = json.loads(fpath.read_text(encoding="utf-8"))
-                for turn in turns:
-                    try:
-                        ts = datetime.fromisoformat(turn.get("ts", "1970-01-01"))
-                    except ValueError:
-                        ts = datetime.min
-                    if ts >= cutoff:
-                        results.append(turn)
-            except (json.JSONDecodeError, OSError):
+                with fpath.open(encoding="utf-8") as fh:
+                    for raw in fh:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            turn = json.loads(raw)
+                            ts = datetime.fromisoformat(turn.get("ts", "1970-01-01"))
+                            if ts >= cutoff:
+                                results.append(turn)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+            except OSError:
                 continue
 
         return results
@@ -285,7 +268,7 @@ class ConversationHistory:
         return dt.strftime("%Y-%m-%d")
 
     def _day_file(self, day_key: str) -> Path:
-        return self._dir / f"{day_key}.json"
+        return self._dir / f"{day_key}.jsonl"
 
     def purge_old(self) -> None:
         """Delete day files older than *max_days*.
@@ -293,10 +276,9 @@ class ConversationHistory:
         Call this once at app startup — not on every turn.
         """
         cutoff = datetime.now() - timedelta(days=self._max_days)
-        for fpath in self._dir.glob("*.json"):
+        for fpath in self._dir.glob("*.jsonl"):
             try:
-                stem = fpath.stem  # e.g. "2026-03-12"
-                file_date = datetime.strptime(stem, "%Y-%m-%d")
+                file_date = datetime.strptime(fpath.stem, "%Y-%m-%d")
                 if file_date < cutoff:
                     fpath.unlink()
                     logger.debug("Purged old history file: %s", fpath.name)
@@ -339,9 +321,7 @@ class OpenAIChatHandler:
         await self._bus.publish(EventType.LLM_RESPONSE_STARTED)
         logger.debug("OpenAI stream start | model=%s", self._model)
         
-        # response는 전체 텍스트가 아니라 AsyncIterator (토큰이 생성될 때마다 하나씩 도착하는 스트림)
-        # 이 await 는 첫번째 토큰이 도착하기 전에 HTTP 연결만 맺고 바로 리턴한다.
-        # gpt-5-mini 등 신형 모델은 temperature=1.0(기본값) 외 값을 거부하므로 기본값이면 생략한다.
+        # Newer OpenAI models reject temperature != 1.0; omit unless overridden.
         extra: dict[str, Any] = {}
         if self._temperature != 1.0:
             extra["temperature"] = self._temperature
@@ -353,14 +333,12 @@ class OpenAIChatHandler:
             **extra,
         )
 
-        # OpenAI 서버에서 토큰이 하나 생성될 때 마다 chunk 객체가 도착한다. 
-        async for chunk in response: 
-            token: str = chunk.choices[0].delta.content or ""  # None 이 오는 경우 빈문자열 처리
+        async for chunk in response:
+            token: str = chunk.choices[0].delta.content or ""
             if token:
                 await self._bus.publish(EventType.LLM_RESPONSE_CHUNK, data=token)
-                yield token         # 이 토큰을 호출자(_llm_worker 의 async for 에 전달한다.). 여기서 함수가 일시정지 되고, 다음 토큰이 오면 다시 재개
+                yield token
 
-        await self._bus.publish(EventType.LLM_RESPONSE_DONE)
         logger.debug("OpenAI stream done")
 
     async def close(self) -> None:
@@ -389,7 +367,7 @@ class ClaudeChatHandler:
         self._bus = bus
         self._model: str = cfg.get("llm.claude_model", "claude-sonnet-4-6")
         self._max_tokens: int = cfg.get("llm.max_tokens", 1024)
-        # claude_temperature 우선; 없으면 공통 temperature 사용 (단 Claude는 1.0 제약 없음)
+        # Claude has no temperature=1.0 restriction; falls back to shared llm.temperature.
         self._temperature: float = cfg.get("llm.claude_temperature", cfg.get("llm.temperature", 0.7))
         import httpx as _httpx
 
@@ -418,7 +396,6 @@ class ClaudeChatHandler:
                     await self._bus.publish(EventType.LLM_RESPONSE_CHUNK, data=token)
                     yield token
 
-        await self._bus.publish(EventType.LLM_RESPONSE_DONE)
         logger.debug("Claude stream done")
 
     async def close(self) -> None:
@@ -455,7 +432,7 @@ class CustomLLMChatHandler:
         self._url: str = cfg.get("llm.custom_url", "")
         self._model_id: str = cfg.get("llm.custom_model_id", "")
         self._max_tokens: int = cfg.get("llm.max_tokens", 1024)
-        # custom_temperature 우선; 없으면 공통 temperature 사용
+        # Falls back to shared llm.temperature if custom_temperature is not set.
         self._temperature: float = cfg.get("llm.custom_temperature", cfg.get("llm.temperature", 0.7))
 
         headers: dict[str, str] = {
@@ -514,8 +491,91 @@ class CustomLLMChatHandler:
                 except json.JSONDecodeError:
                     continue
 
-        await self._bus.publish(EventType.LLM_RESPONSE_DONE)
         logger.debug("Custom LLM stream done")
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# ApiChatHandler
+# ---------------------------------------------------------------------------
+
+class ApiChatHandler:
+    """Non-streaming HTTP handler: POST once, yield full response as one chunk.
+
+    LLM 대신 임의의 HTTP API에 단발 POST를 날려 응답 전체를 받은 후,
+    `stream()`이 그 텍스트를 **한 번만** yield한다. 파이프라인(`pipeline.py`)은
+    스트리밍 여부에 독립적이므로 `PhraseAccumulator`가 문장 경계로 자동 분할해
+    TTS로 공급한다.
+
+    요청 payload는 단일 키 JSON::
+
+        {"<request_key>": "<STT 결과 텍스트>"}
+
+    응답은 JSON이며 ``response_path`` dot path로 텍스트를 추출::
+
+        response_path="response"     → data["response"]
+        response_path="result.text"  → data["result"]["text"]
+
+    Args:
+        cfg: App config — reads ``llm.api.url``, ``llm.api.auth_header``,
+             ``llm.api.request_key``, ``llm.api.response_path``, ``llm.api.timeout``.
+        bus: Shared event bus.
+    """
+
+    def __init__(self, cfg: Config, bus: EventBus) -> None:
+        import httpx
+
+        self._bus = bus
+        self._url: str = cfg.get("llm.api.url", "")
+        self._request_key: str = cfg.get("llm.api.request_key", "query")
+        self._response_path: str = cfg.get("llm.api.response_path", "response")
+        timeout: float = float(cfg.get("llm.api.timeout", 30))
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        auth_header: str = cfg.get("llm.api.auth_header", "")
+        if auth_header:
+            headers["Authorization"] = auth_header
+
+        self._client = httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(timeout=timeout, connect=10.0),
+            trust_env=False,
+        )
+
+    async def stream(self, context: ConversationContext) -> AsyncIterator[str]:  # type: ignore[override]
+        """POST 최신 user 발화 → 응답 전체 텍스트 1회 yield."""
+        await self._bus.publish(EventType.LLM_RESPONSE_STARTED)
+        logger.debug("API stream start | url=%s", self._url)
+
+        # Send only the latest user message; skip compression summary turns.
+        user_text = ""
+        for msg in reversed(context.get_messages()):
+            if msg["role"] == "user" and not msg["content"].startswith("[이전 대화 요약]"):
+                user_text = msg["content"]
+                break
+
+        payload = {self._request_key: user_text}
+
+        response = await self._client.post(self._url, json=payload)
+        response.raise_for_status()
+        data: Any = response.json()
+
+        # Walk the dot-separated response_path to extract the text field.
+        node: Any = data
+        for part in self._response_path.split("."):
+            if not isinstance(node, dict):
+                node = ""
+                break
+            node = node.get(part, "")
+        text = str(node or "")
+
+        if text:
+            await self._bus.publish(EventType.LLM_RESPONSE_CHUNK, data=text)
+            yield text
+
+        logger.debug("API stream done | len=%d", len(text))
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -529,7 +589,11 @@ def create_chat_handler(cfg: Config, bus: EventBus) -> ChatHandler:
     """Instantiate and return the configured LLM handler.
 
     Reads ``llm.provider`` from config (also set via ``LLM_PROVIDER`` env var).
-    Supported values: ``"openai"``, ``"claude"``, ``"custom"``.
+    Supported values: ``"openai"``, ``"claude"``, ``"custom"``, ``"api"``.
+
+    ``"api"`` selects :class:`ApiChatHandler` which bypasses the LLM entirely and
+    forwards the STT text to an arbitrary HTTP endpoint, returning the full
+    response as a single TTS-ready chunk.
 
     Args:
         cfg: Application config.
@@ -555,7 +619,11 @@ def create_chat_handler(cfg: Config, bus: EventBus) -> ChatHandler:
         logger.info("LLM provider: Custom (url=%s)", cfg.get("llm.custom_url", "?"))
         return CustomLLMChatHandler(cfg, bus)
 
+    if provider == "api":
+        logger.info("LLM provider: API (url=%s)", cfg.get("llm.api.url", "?"))
+        return ApiChatHandler(cfg, bus)
+
     raise ValueError(
         f"Unknown LLM provider: {provider!r}. "
-        "Choose one of: 'openai', 'claude', 'custom'."
+        "Choose one of: 'openai', 'claude', 'custom', 'api'."
     )

@@ -1,4 +1,4 @@
-"""web.py — FastAPI web UI server for Yona voice assistant.
+"""web.py — FastAPI web UI server for Samsung Gauss Voice Assistant.
 
 Runs inside the existing asyncio event loop alongside YonaApp.
 Serves a dark-theme HTML page and streams real-time conversation
@@ -21,12 +21,34 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from src.config import Config
 from src.events import Event, EventBus, EventType
 from src.state import ConversationState as CS
 
 logger = logging.getLogger(__name__)
+
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+class _IPAllowlistMiddleware(BaseHTTPMiddleware):
+    """Reject requests whose source IP is not in the configured allowlist.
+
+    Loopback addresses are always permitted regardless of the allowlist.
+    """
+
+    def __init__(self, app, allowed: list[str]) -> None:
+        super().__init__(app)
+        self._allowed: frozenset[str] = frozenset(allowed) | _LOOPBACK
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        client_ip = request.client.host if request.client else ""
+        if client_ip not in self._allowed:
+            logger.warning("Web UI: rejected connection from %s (not in allowed_hosts)", client_ip)
+            return Response("Forbidden", status_code=403)
+        return await call_next(request)
 
 
 class _SuppressSSEShutdownWarning(logging.Filter):
@@ -555,7 +577,7 @@ connect();
 
 
 class WebServer:
-    """FastAPI + uvicorn SSE server integrated into the Yona asyncio event loop.
+    """FastAPI + uvicorn SSE server for Samsung Gauss Voice Assistant.
 
     Subscribes to EventBus events and broadcasts them to all connected
     browser clients via Server-Sent Events. Runs in the same asyncio
@@ -566,9 +588,14 @@ class WebServer:
         self._cfg = cfg
         self._bus = bus
         self._clients: set[asyncio.Queue[str | None]] = set()
-        self._app = FastAPI(title="Yona Web UI")
+        self._app = FastAPI(title="Yona Voice Assistant")
         self._server: uvicorn.Server | None = None
         self._bridge_task: asyncio.Task | None = None
+
+        allowed_hosts: list[str] = cfg.get("web.allowed_hosts", [])
+        if allowed_hosts:
+            self._app.add_middleware(_IPAllowlistMiddleware, allowed=allowed_hosts)
+
         self._register_routes()
 
     # ------------------------------------------------------------------
@@ -579,11 +606,11 @@ class WebServer:
         app = self._app
 
         @app.get("/")
-        async def index() -> HTMLResponse:
+        async def _index() -> HTMLResponse:
             return HTMLResponse(content=_HTML_PAGE, status_code=200)
 
         @app.get("/events")
-        async def events(request: Request) -> EventSourceResponse:
+        async def _events(request: Request) -> EventSourceResponse:
             return EventSourceResponse(
                 self._client_generator(request),
                 ping=15,  # keep-alive ping every 15 s (prevents proxy timeouts)
@@ -718,8 +745,17 @@ class WebServer:
 
         Designed to be launched as: ``asyncio.create_task(web.serve())``
         """
-        host = self._cfg.get("web.host", "0.0.0.0")
+        host = self._cfg.get("web.host", "127.0.0.1")
         port = self._cfg.get("web.port", 8080)
+        allowed_hosts: list[str] = self._cfg.get("web.allowed_hosts", [])
+
+        if host not in _LOOPBACK and not allowed_hosts:
+            logger.warning(
+                "Web UI is bound to %s with no allowed_hosts configured — "
+                "any LAN device can read conversation transcripts. "
+                "Add web.allowed_hosts or restrict to 127.0.0.1.",
+                host,
+            )
 
         self._bridge_task = asyncio.create_task(self._bridge())
 

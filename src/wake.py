@@ -12,18 +12,6 @@ WakeWordDetector
 
     A cooldown period suppresses immediate re-triggers after a detection.
 
-Usage::
-
-    from src.config import Config
-    from src.events import EventBus
-    from src.wake import WakeWordDetector
-
-    detector = WakeWordDetector(cfg, bus)
-    audio_manager.add_input_callback(detector.process_chunk)
-
-    # ... application runs ...
-
-    detector.reset()
 """
 
 from __future__ import annotations
@@ -84,6 +72,12 @@ class WakeWordDetector:
         self._chunk_count: int = 0  # for periodic debug logging
         self._max_score: float = 0.0  # track peak score for debugging
 
+        # Pre-allocated scratch buffers for float32→int16 conversion in the
+        # sounddevice callback — avoids 3 heap allocations (~5 KB) per chunk.
+        _chunk_size: int = cfg.get("audio.chunk_size", 512)
+        self._float_buf = np.empty(_chunk_size, dtype=np.float32)
+        self._pcm_buf = np.empty(_chunk_size, dtype=np.int16)
+
         logger.info(
             "WakeWordDetector ready | models=%s active=%s threshold=%.2f "
             "patience=%d cooldown=%.1fs",
@@ -119,8 +113,12 @@ class WakeWordDetector:
         """
         audio = np.asarray(chunk, dtype=np.float32).ravel()
 
-        # float32 [-1, 1] → int16 [-32768, 32767]
-        pcm = (audio * 32767.0).clip(-32768, 32767).astype(np.int16)
+        # float32 [-1, 1] → int16 [-32768, 32767] using pre-allocated buffers
+        n = len(audio)
+        np.multiply(audio, 32767.0, out=self._float_buf[:n])
+        np.clip(self._float_buf[:n], -32768, 32767, out=self._float_buf[:n])
+        self._pcm_buf[:n] = self._float_buf[:n]
+        pcm = self._pcm_buf[:n]
 
         # Run prediction — raw scores only, no patience/threshold args
         result = self._model.predict(pcm)

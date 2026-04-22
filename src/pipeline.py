@@ -8,17 +8,6 @@ The pipeline connects the LLM token stream to the speaker via phrase-level
 TTS synthesis, enabling low-latency audio output while the LLM is still
 generating.  Barge-in support is built in via ``interrupt()``.
 
-Usage::
-
-    from src.llm import create_chat_handler, ConversationContext
-    from src.tts import create_synthesizer
-    from src.audio import AudioManager
-    from src.events import EventBus
-    from src.pipeline import StreamingPipeline
-
-    pipeline = StreamingPipeline(handler, synth, audio_mgr, bus)
-    response = await pipeline.run(context, detected_language="ko")
-    # During playback, call pipeline.interrupt() for barge-in
 """
 
 from __future__ import annotations
@@ -172,8 +161,8 @@ class StreamingPipeline:
     #: Increased from ko=15/en=30 since TTS RTF ≈ 0.35-0.45x at
     #: total_steps=8 — longer phrases produce more natural prosody
     #: while still staying comfortably ahead of playback.
-    _MIN_PHRASE_BY_LANG: dict[str, int] = {"ko": 25, "en": 50}
-    DEFAULT_MIN_PHRASE_LENGTH = 25
+    _MIN_PHRASE_BY_LANG: dict[str, int] = {"ko": 30, "en": 50}
+    DEFAULT_MIN_PHRASE_LENGTH = 30
 
     def __init__(
         self,
@@ -325,10 +314,7 @@ class StreamingPipeline:
             logger.error("LLM worker error: %s", exc)
             await self._bus.publish(EventType.ERROR, data=exc)
         finally:
-            # Always publish DONE so main.py subscribers never hang —
-            # even on barge-in or error where the stream was cut short.
-            # Note: the LLM handler also publishes this on normal completion,
-            # so subscribers may see it twice — this is intentional for safety.
+            # Always publish DONE so subscribers never hang — on success, error, or barge-in.
             await self._bus.publish(EventType.LLM_RESPONSE_DONE)
             await phrase_queue.put(None)
 

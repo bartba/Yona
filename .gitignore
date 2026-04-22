@@ -49,6 +49,12 @@ models/tts/
 .pytest_cache/
 .mypy_cache/
 
+# Backup files
+*.bak
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Test
+# tests/

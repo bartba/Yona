@@ -18,19 +18,6 @@ ChimePlayer
     Plays a short sine-wave chime on wake-word detection.  Uses the shared
     AudioManager so it shares the same output device and sample-rate path.
 
-Usage::
-
-    from src.config import Config
-    from src.audio import AudioBuffer, AudioManager, ChimePlayer
-
-    cfg = Config()
-    manager = AudioManager(cfg)
-    chime = ChimePlayer(cfg, manager)
-
-    await manager.start()
-    manager.add_input_callback(my_vad_callback)
-    await chime.play()
-    await manager.stop()
 """
 
 from __future__ import annotations
@@ -38,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from math import gcd
 import subprocess
 import threading
 import time
@@ -45,6 +33,7 @@ from typing import Callable
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 
 from src.config import Config
 
@@ -72,8 +61,6 @@ class AudioBuffer:
         buffer_seconds: float = 30.0,
     ) -> None:
         self._sample_rate = sample_rate
-        # sample_rate × buffer_seconds = 총 샘플 수
-        # (예: 16000 Hz × 30초 = 480,000 샘플 ≈ chunk_size 512 기준 938회 push)
         self._capacity = int(sample_rate * buffer_seconds)
         self._buffer = np.zeros(self._capacity, dtype=np.float32)
         self._write_pos = 0
@@ -474,10 +461,10 @@ class AudioManager:
 def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
     """Resample *audio* from *from_rate* Hz to *to_rate* Hz.
 
-    Uses linear interpolation (numpy.interp).  Handles arbitrary integer and
-    non-integer ratios.  Output length is
-    ``ceil(len(audio) * to_rate / from_rate)`` samples.
-    마이크 입력 : 16kHz, Supertonic 출력 : 44.1kHz, 스피커 출력 : 48kHz
+    Uses polyphase FIR filtering (scipy.signal.resample_poly) which applies a
+    Kaiser-windowed anti-aliasing filter before up/downsampling.  This avoids
+    the aliasing artefacts that linear interpolation introduces on non-integer
+    ratios such as 44 100 → 48 000 Hz (up=160, down=147).
 
     Args:
         audio:     1-D float32 array.
@@ -489,11 +476,9 @@ def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
     """
     if from_rate == to_rate:
         return audio
-    n_in = len(audio)
-    n_out = math.ceil(n_in * to_rate / from_rate)
-    x_old = np.linspace(0.0, 1.0, n_in)
-    x_new = np.linspace(0.0, 1.0, n_out)
-    return np.interp(x_new, x_old, audio).astype(np.float32)
+    g = gcd(from_rate, to_rate)
+    up, down = to_rate // g, from_rate // g
+    return resample_poly(audio, up, down).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -519,9 +504,8 @@ class ChimePlayer:
     # Without this margin the entire 0.3 s chime falls inside the mute window
     # and is silent.  The user hears the chime after _WARMUP_DURATION seconds.
     _WARMUP_DURATION = 0.4        # seconds of silence before audible chime
-    _FREQ_BASE = 880.0            # Hz — A5 기준음
-    # (ratio, amplitude, decay_rate) — 벨 배음 구조
-    # ratio: 기본음 대비 배음 비율, decay: 지수 감쇠 속도 (클수록 빨리 소멸)
+    _FREQ_BASE = 880.0            # Hz — A5
+    # (freq_ratio, amplitude, decay_rate): bell overtone series tuned by ear.
     _HARMONICS: list[tuple[float, float, float]] = [
         (1.00, 0.40,  8.0),
         (2.76, 0.25,  5.0),
@@ -571,10 +555,9 @@ class ChimePlayer:
         wave = np.zeros(n, dtype=np.float64)
         for ratio, amp, decay in cls._HARMONICS:
             freq = cls._FREQ_BASE * ratio
-            envelope = amp * np.exp(-decay * t)          # 지수 감쇠
+            envelope = amp * np.exp(-decay * t)
             wave += envelope * np.sin(2.0 * math.pi * freq * t)
 
-        # 정규화: 피크를 0.7로 맞춰 클리핑 방지
         peak = np.abs(wave).max()
         if peak > 0:
             wave = wave / peak * 0.7

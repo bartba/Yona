@@ -15,23 +15,6 @@ VoiceActivityDetector
     Barge-in mode (used during SPEAKING):
         BARGE_IN_DETECTED — first chunk above barge_in_threshold
 
-Usage::
-
-    from src.config import Config
-    from src.events import EventBus
-    from src.vad import VoiceActivityDetector
-
-    vad = VoiceActivityDetector(cfg, bus)
-
-    # Register as an AudioManager input callback:
-    audio_manager.add_input_callback(vad.process_chunk)
-
-    # Switch to barge-in mode when TTS is speaking:
-    vad.set_barge_in_mode(True)
-
-    # Back to normal after interruption:
-    vad.set_barge_in_mode(False)
-    vad.reset()
 """
 
 from __future__ import annotations
@@ -80,6 +63,10 @@ class VoiceActivityDetector:
         # Silero v5/v6 context window — last 64 samples from previous chunk
         self._context_size: int = 64 if self._sample_rate == 16_000 else 32
         self._context = np.zeros(self._context_size, dtype=np.float32)
+
+        # Pre-allocated sample-rate tensor — constant for the app lifetime,
+        # so we create it once here instead of allocating on every callback.
+        self._sr_tensor = np.array(self._sample_rate, dtype=np.int64)
 
         # Speech-detection state
         self._barge_in_mode: bool = False
@@ -145,14 +132,12 @@ class VoiceActivityDetector:
         x = np.concatenate([self._context, audio]).reshape(1, -1)
         self._context = audio[-self._context_size:].copy()
 
-        sr = np.array(self._sample_rate, dtype=np.int64)
-
         out = self._session.run(
             None,
             {
                 "input": x,
                 "state": self._state,
-                "sr": sr,
+                "sr": self._sr_tensor,
             },
         )
 
@@ -191,7 +176,6 @@ class VoiceActivityDetector:
                 if silence_elapsed >= silence_dur:
                     speech_duration = self._last_speech - self._speech_start
                     self._speech_active = False
-                    if not self._barge_in_mode and speech_duration >= self._min_speech_duration: 
-                        # SPEAKING 중 사용자 발화->barge-in 모드->TTS 중단->LISTENING 전환->Barge-in 모드 해제
-                        # Barge-in 모드 에서는 SPEECH_ENDED 이벤트(STT 트리거)를 발생시킬 이유 없음.
+                    if not self._barge_in_mode and speech_duration >= self._min_speech_duration:
+                        # barge-in mode suppresses SPEECH_ENDED; pipeline.interrupt() handles the transition.
                         self._bus.publish_nowait(EventType.SPEECH_ENDED)

@@ -8,15 +8,6 @@ Provides:
 SupertonicSynthesizer runs inference in ``asyncio.to_thread`` so it never
 blocks the asyncio event loop (ONNX Runtime calls are blocking).
 
-Usage::
-
-    from src.config import Config
-    from src.tts import create_synthesizer
-
-    synth = create_synthesizer(cfg)
-    audio, sr = await synth.synthesize("안녕하세요!")
-    # audio: np.ndarray float32, sr: 44100
-    await synth.close()
 """
 
 from __future__ import annotations
@@ -24,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -41,10 +33,14 @@ _FANCY_QUOTES_RE = re.compile(r"[\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300
 _DASH_RE = re.compile(r"\s*[\u2014\u2013]\s*")  # em-dash, en-dash → comma
 # L-O-V-E → LOVE (single-letter segments only; keeps "well-known")
 _LETTER_SPELL_RE = re.compile(r"(?<![A-Za-z-])(?:[A-Za-z]-)+[A-Za-z](?![A-Za-z-])")
-_PAREN_RE = re.compile(r"\s*\(([^)]*)\)\s*")  # (내용) → , 내용,
+_PAREN_RE = re.compile(r"\s*\(([^)]*)\)\s*")  # (text) → , text,
 # D.C. → DC (two or more single-letter-dot sequences)
 _ABBREV_DOT_RE = re.compile(r"(?<![A-Za-z])(?:[A-Za-z]\.){2,}")
 _MULTI_SPACE_RE = re.compile(r"[ \t]+")
+# … or consecutive dots (2+) → ". "  (소수점 단일 점은 매칭 안 됨)
+_ELLIPSIS_RE = re.compile(r"[…]|\.{2,}")
+# Sentence-final punctuation check for terminal guarantee
+_NEEDS_TERMINAL_RE = re.compile(r"[.!?。！？]$")
 
 
 def _unwrap_parens(m: re.Match) -> str:
@@ -63,15 +59,20 @@ def _clean_tts_text(text: str) -> str:
     Keeps apostrophes (``'``) for English contractions (don't, it's).
     """
     text = text.replace("\n", " ")
+    text = unicodedata.normalize("NFKC", text)  # fullwidth ASCII → halfwidth, Hangul 정규화
     text = _MARKDOWN_RE.sub("", text)
     text = _FANCY_QUOTES_RE.sub("", text)
     text = text.replace('"', "")
     text = _DASH_RE.sub(", ", text)
+    text = _ELLIPSIS_RE.sub(". ", text)  # … / ... → ". " (소수점 단일 점 무영향)
     text = _LETTER_SPELL_RE.sub(lambda m: m.group(0).replace("-", ""), text)
     text = _PAREN_RE.sub(_unwrap_parens, text)
     text = _ABBREV_DOT_RE.sub(lambda m: m.group(0).replace(".", ""), text)
     text = _MULTI_SPACE_RE.sub(" ", text)
-    return text.strip()
+    text = text.strip()
+    if text and not _NEEDS_TERMINAL_RE.search(text):
+        text = text + "."
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +124,12 @@ class SupertonicSynthesizer:
         from supertonic import TTS as SupertonicTTS
 
         self._language: str = cfg.get("tts.language", "ko")
-        self._speed: float = cfg.get("tts.speed", 1.05)
-        self._total_steps: int = cfg.get("tts.total_steps", 5)
+        self._speed: float = cfg.get("tts.speed", 1.0)
+        self._total_steps: int = cfg.get("tts.total_steps", 8)
+        self._leading_silence_sec: float = cfg.get("tts.leading_silence_sec", 0.05)
+        self._trailing_silence_sec: float = cfg.get("tts.trailing_silence_sec", 0.08)
+        self._max_chunk_length: int | None = cfg.get("tts.max_chunk_length", None)
+        self._silence_duration: float = cfg.get("tts.silence_duration", 0.1)
 
         voice_name: str = cfg.get("tts.voice", "M1")
 
@@ -139,10 +144,11 @@ class SupertonicSynthesizer:
 
         logger.info(
             "SupertonicSynthesizer ready | lang=%s voice=%s speed=%.2f "
-            "steps=%d sr=%d ort_intra=%s ort_inter=%s voices=%s",
+            "steps=%d sr=%d lead=%.3fs trail=%.3fs ort_intra=%s ort_inter=%s",
             self._language, voice_name, self._speed,
-            self._total_steps, self._sample_rate, intra, inter,
-            self._tts.voice_style_names,
+            self._total_steps, self._sample_rate,
+            self._leading_silence_sec, self._trailing_silence_sec,
+            intra, inter,
         )
 
     async def synthesize(self, text: str) -> tuple[np.ndarray, int]:
@@ -163,31 +169,28 @@ class SupertonicSynthesizer:
         )
         return samples, self._sample_rate
 
-    #: Leading silence (seconds) prepended to every synthesis output.
-    #: Neural TTS attention can swallow the first phoneme when audio
-    #: starts immediately — a short pad gives the speaker/DAC time to
-    #: settle and prevents the first syllable from being clipped.
-    _LEADING_SILENCE_SEC = 0.05  # 50 ms
-
     def _synthesize_sync(self, text: str) -> np.ndarray:
         """Blocking synthesis — called via to_thread."""
-        wav, _dur = self._tts.synthesize(
-            text,
+        kwargs: dict = dict(
             voice_style=self._voice_style,
             lang=self._language,
             speed=self._speed,
             total_steps=self._total_steps,
+            silence_duration=self._silence_duration,
         )
+        if self._max_chunk_length is not None:
+            kwargs["max_chunk_length"] = self._max_chunk_length
+
+        wav, _dur = self._tts.synthesize(text, **kwargs)
         # wav shape is (1, N) — flatten to 1-D
         audio = wav[0] if wav.ndim > 1 else wav
         audio = np.asarray(audio, dtype=np.float32)
 
-        # Prepend short silence to protect the first phoneme
-        pad = np.zeros(
-            int(self._sample_rate * self._LEADING_SILENCE_SEC),
-            dtype=np.float32,
-        )
-        return np.concatenate([pad, audio])
+        # Leading pad: protects first phoneme from attention clipping
+        # Trailing pad: protects last phoneme from diffusion tail cutoff
+        pad  = np.zeros(int(self._sample_rate * self._leading_silence_sec),  dtype=np.float32)
+        tail = np.zeros(int(self._sample_rate * self._trailing_silence_sec), dtype=np.float32)
+        return np.concatenate([pad, audio, tail])
 
     async def set_language(self, language: str) -> None:
         """Switch synthesis language — instant, no model reload.

@@ -3,11 +3,6 @@
 Wires together all components (audio, VAD, wake word, STT, LLM, TTS,
 pipeline) and drives the conversation state machine via EventBus events.
 
-Usage::
-
-    python -m src.main                  # run the app
-    python -m src.main --list-devices   # show audio devices
-    python -m src.main --config path    # custom config file
 """
 
 from __future__ import annotations
@@ -37,25 +32,20 @@ from src.wake import WakeWordDetector
 
 logger = logging.getLogger(__name__)
 
-# Goodbye intent patterns (Korean + English, including mixed cases)
-# Triggered by "bye bye Mack" / "goodbye Mack" / "바이 바이 Mac" style phrases.
-# Korean farewell + Korean name:
-#   굿/굳 (받침 ㅅ↔ㄷ 동음) + 바/빠 (된소리 변형) + 이 + 맥/막/맨 — 음절 사이 공백 허용
-#   바이바이/빠이빠이 + 맥/막/맨
-#   name: 맥(Mack), 멕(STT 오인식 변형)
-# Korean farewell + English name (mixed): 바이 바이 Mac/Mack, 빠이빠이 mac
-# English farewell + English name: bye bye mack/mac/meg/man, goodbye mack/mac/meg/man
-#   name: mack(정확), mac/meg/man(STT 오인식 변형 — meg: Mack→Meg 오인식)
-# English farewell + Korean name (mixed): bye bye 맥, goodbye 맥/멕
-# Legacy (no name): 바이바이, bye bye  — kept for backward compat
+# Goodbye intent — name variants (맥/멕, mack/mac/meg/man) cover STT misrecognitions.
+_FAREWELL_KO = r"(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)"
+_FAREWELL_EN = r"\b(?:bye[\s\-]?bye|good[\s\-]?bye)"
+_NAME_KO = r"(?:맥|멕)"
+_NAME_EN = r"(?:mack|mac|meg|man)\b"
 _GOODBYE_RE = re.compile(
-    r"(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:맥|멕)"  # Korean farewell + Korean name
-    r"|(?:[굳굿]\s*[바빠]이|바이\s*바이|빠이\s*빠이)\s*(?:mack|mac|meg|man)\b"  # Korean farewell + English name
-    r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]*(?:mack|mac|meg|man)\b"  # English farewell + English name
-    r"|\b(?:bye[\s\-]?bye|good[\s\-]?bye)[\s,\.]*(?:맥|멕)"  # English farewell + Korean name
-    r"|\bbye[\s,\.]+(?:mack|mac|meg|man)\b"  # "Bye, Mac." / "Bye Mac." (single bye + name)
-    r"|바이바이"  # Legacy Korean (no name)
-    r"|\bbye[\s\-]?bye\b",  # Legacy English (no name)
+    rf"{_FAREWELL_KO}\s*{_NAME_KO}"           # 바이바이 맥
+    rf"|{_FAREWELL_KO}\s*{_NAME_EN}"          # 바이바이 mac
+    rf"|{_FAREWELL_EN}[\s,\.]*{_NAME_EN}"     # bye bye Mack
+    rf"|{_FAREWELL_EN}[\s,\.]*{_NAME_KO}"     # bye bye 맥
+    rf"|\bbye[\s,\.]+{_NAME_EN}"              # Bye, Mac
+    rf"|\bbye[\s,\.]+{_NAME_KO}"              # Bye, 맥
+    rf"|바이바이"                              # 바이바이 (이름 없음)
+    rf"|{_FAREWELL_EN}\b",                    # bye bye / goodbye (이름 없음)
     re.IGNORECASE,
 )
 
@@ -74,10 +64,9 @@ class YonaApp:
         self._sm = StateMachine(self._bus)
         self._running = False
 
-        # Background tasks defined by "life cycle"  : _timeout_task 와 _process_task 는 수시로 개별 생성/취소
-        self._timeout_task: asyncio.Task | None = None # 사용자가 말하면 취소하고 다시 시작(리셋), 대화별로 생성/취소
-        self._process_task: asyncio.Task | None = None # 발화 하나당 한번 생성(STT->LLM->TTS), 발화별로 생성/취소
-        self._handler_tasks: list[asyncio.Task] = []   # 앱이 실행되는 동안 살아있는 리스너들 (묶어서 처리)
+        self._timeout_task: asyncio.Task | None = None  # reset on every speech start
+        self._process_task: asyncio.Task | None = None  # one per utterance (STT→LLM→TTS)
+        self._handler_tasks: list[asyncio.Task] = []    # long-lived event listeners
         self._web = None  # WebServer instance (optional)
         self._web_task: asyncio.Task | None = None
 
@@ -172,17 +161,31 @@ class YonaApp:
         allocations.  Dropping caches after TTS loads ensures enough
         free memory for STT inference pool expansion.
 
-        Requires sudoers NOPASSWD; silently skips if unavailable.
+        Requires two narrow sudoers NOPASSWD entries (no shell access granted):
+            bart ALL=(root) NOPASSWD: /usr/bin/sync
+            bart ALL=(root) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches
+        Silently skips if sudo is not configured.
         """
         gc.collect()
         try:
+            subprocess.run(["sudo", "-n", "sync"], capture_output=True, timeout=5, check=True)
             subprocess.run(
-                ["sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
-                capture_output=True, timeout=5,
+                ["sudo", "-n", "tee", "/proc/sys/vm/drop_caches"],
+                input=b"3",
+                capture_output=True,
+                timeout=5,
+                check=True,
             )
             logger.info("Page cache dropped for CUDA memory headroom")
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or b"").decode(errors="replace").strip()
+            logger.warning(
+                "Page cache drop failed — CUDA memory may be fragmented. "
+                "Configure sudoers (see _drop_page_cache docstring). stderr: %s",
+                stderr or "(none)",
+            )
         except (subprocess.SubprocessError, FileNotFoundError):
-            logger.debug("Could not drop page caches (sudo NOPASSWD not configured)")
+            logger.debug("Could not drop page caches (subprocess error)")
 
     # ------------------------------------------------------------------
     # Audio callback  (sounddevice thread — sync, must return quickly)
@@ -190,19 +193,16 @@ class YonaApp:
 
     def _audio_callback(self, chunk: np.ndarray) -> None:
         """Dispatch incoming audio based on current conversation state."""
+        if self._wake is None or self._vad is None or self._buffer is None:
+            return  # components not yet initialised
         state = self._sm.state
 
         if state == CS.IDLE:
             self._wake.process_chunk(chunk)
-
         elif state == CS.LISTENING:
             self._buffer.push(chunk)
             self._vad.process_chunk(chunk)
-
-        elif state == CS.SPEAKING:
-            self._vad.process_chunk(chunk)
-
-        elif state == CS.TIMEOUT_CHECK:
+        elif state in (CS.SPEAKING, CS.TIMEOUT_CHECK):
             self._vad.process_chunk(chunk)
 
     # ------------------------------------------------------------------
@@ -269,11 +269,7 @@ class YonaApp:
     # ------------------------------------------------------------------
 
     async def _process_utterance(self) -> None:
-        """STT → goodbye check → LLM+TTS pipeline → back to LISTENING.
-
-        사용자가 말을 끝낸 순간(SPEECH_ENDED)부터 시작,
-        assistant가 대답을 끝내고 다시 듣기 시작하는 순간까지의 모든것 처리.
-        """
+        """STT → goodbye check → LLM+TTS pipeline → back to LISTENING."""
         t_start = time.monotonic()
         try:
             audio = self._buffer.get_all()
@@ -285,74 +281,17 @@ class YonaApp:
                 self._restart_timeout()
                 return
 
-            # Transcribe
-            t_stt = time.monotonic()
-            text = await self._stt.transcribe(audio)
-            stt_dur = time.monotonic() - t_stt
-            lang = self._stt.detected_language or "ko"
-            logger.info("⏱ STT: %.2fs | audio=%.2fs | lang=%s | text=%s",
-                        stt_dur, len(audio) / 16000, lang, (text or "")[:80])
-
+            text, lang, stt_dur = await self._run_stt(audio)
             if not text:
-                logger.info("Empty transcription — notify and back to LISTENING")
-                msgs = self._cfg.get("conversation.empty_transcription_message", {})
-                msg = msgs.get(lang, msgs.get("ko", "잘 못 들었어요."))
-                await self._play_tts(msg)
-                await self._sm.transition(CS.LISTENING)
-                self._restart_timeout()
-                return
+                return  # _run_stt already transitioned back to LISTENING
 
-            logger.info("User [%s]: %s", lang, text)
-            print(f"\nUser: {text}")
-            self._bus.publish_nowait(EventType.TRANSCRIPTION_READY, text)
-
-            # Goodbye intent — use last conversation language, not farewell's STT language
             if _GOODBYE_RE.search(text):
                 await self._handle_goodbye(self._last_conversation_lang)
                 return
 
-            # Add user message to context
-            self._context.add_user(text)
+            await self._run_pipeline_turn(text, lang, stt_dur, t_start)
+            await self._maybe_compress(lang)
 
-            # Transition to SPEAKING and run streaming pipeline
-            await self._sm.transition(CS.SPEAKING)
-            self._vad.set_barge_in_mode(True)
-            self._vad.reset()
-
-            t_pipeline = time.monotonic()
-            response = await self._pipeline.run(
-                self._context, detected_language=lang,
-            )
-            pipeline_dur = time.monotonic() - t_pipeline
-
-            # Pipeline complete (or interrupted by barge-in)
-            self._vad.set_barge_in_mode(False)
-
-            if response:
-                self._context.add_assistant(response)
-                self._history.append_turn(text, response)
-                self._last_conversation_lang = lang
-                print(f"Assistant: {response}")
-                logger.info("Assistant [%s]: %s", lang, response[:100])
-            else:
-                # Barge-in with no response — remove dangling user message
-                # to prevent consecutive user turns in context
-                self._context.pop_last_user()
-                logger.info("Barge-in: removed unanswered user message from context")
-
-            total_dur = time.monotonic() - t_start
-            logger.info("⏱ TURN COMPLETE: total=%.2fs (STT=%.2fs + pipeline=%.2fs)",
-                        total_dur, stt_dur, pipeline_dur)
-
-            # Compress history if threshold reached.  Transition to
-            # SPEAKING first so barge-in VAD is inactive and no new
-            # speech is processed during the LLM summarisation call.
-            if self._context.needs_compression:
-                if self._sm.state != CS.SPEAKING:
-                    await self._sm.transition(CS.SPEAKING)
-                await self._compress_context(lang)
-
-            # Back to LISTENING
             if self._sm.state == CS.SPEAKING:
                 await self._sm.transition(CS.LISTENING)
                 self._vad.reset()
@@ -363,7 +302,6 @@ class YonaApp:
             raise
         except Exception:
             logger.exception("Error processing utterance")
-            # Notify user via TTS before returning to LISTENING
             lang = (self._stt.detected_language if self._stt else None) or "ko"
             msgs = self._cfg.get("conversation.error_message", {})
             msg = msgs.get(lang, msgs.get("ko", "죄송합니다, 오류가 발생했어요."))
@@ -378,6 +316,72 @@ class YonaApp:
                     pass
                 self._restart_timeout()
 
+    async def _run_stt(self, audio: "np.ndarray") -> "tuple[str, str, float]":
+        """Transcribe audio and handle empty-transcription fallback.
+
+        Returns (text, lang, stt_dur). On empty transcription, plays the
+        fallback TTS message, transitions back to LISTENING, and returns ("", lang, dur).
+        """
+        t_stt = time.monotonic()
+        text = await self._stt.transcribe(audio)
+        stt_dur = time.monotonic() - t_stt
+        lang = self._stt.detected_language or "ko"
+        logger.info("⏱ STT: %.2fs | audio=%.2fs | lang=%s | text=%s",
+                    stt_dur, len(audio) / 16000, lang, (text or "")[:80])
+
+        if not text:
+            logger.info("Empty transcription — notify and back to LISTENING")
+            msgs = self._cfg.get("conversation.empty_transcription_message", {})
+            msg = msgs.get(lang, msgs.get("ko", "잘 못 들었어요."))
+            await self._play_tts(msg)
+            await self._sm.transition(CS.LISTENING)
+            self._restart_timeout()
+            return "", lang, stt_dur
+
+        logger.info("User [%s]: %s", lang, text)
+        print(f"\nUser: {text}")
+        self._bus.publish_nowait(EventType.TRANSCRIPTION_READY, text)
+        return text, lang, stt_dur
+
+    async def _run_pipeline_turn(
+        self, text: str, lang: str, stt_dur: float, t_start: float
+    ) -> None:
+        """Transition to SPEAKING, run the streaming pipeline, save context/history."""
+        self._context.add_user(text)
+
+        await self._sm.transition(CS.SPEAKING)
+        self._vad.set_barge_in_mode(True)
+        self._vad.reset()
+
+        t_pipeline = time.monotonic()
+        response = await self._pipeline.run(self._context, detected_language=lang)
+        pipeline_dur = time.monotonic() - t_pipeline
+
+        self._vad.set_barge_in_mode(False)
+
+        if response:
+            self._context.add_assistant(response)
+            self._history.append_turn(text, response)
+            self._last_conversation_lang = lang
+            print(f"Assistant: {response}")
+            logger.info("Assistant [%s]: %s", lang, response[:100])
+        else:
+            # Barge-in with no response — remove dangling user message
+            self._context.pop_last_user()
+            logger.info("Barge-in: removed unanswered user message from context")
+
+        total_dur = time.monotonic() - t_start
+        logger.info("⏱ TURN COMPLETE: total=%.2fs (STT=%.2fs + pipeline=%.2fs)",
+                    total_dur, stt_dur, pipeline_dur)
+
+    async def _maybe_compress(self, lang: str) -> None:
+        """Compress conversation context if the token threshold has been reached."""
+        if not self._context.needs_compression:
+            return
+        if self._sm.state != CS.SPEAKING:
+            await self._sm.transition(CS.SPEAKING)
+        await self._compress_context(lang)
+
     async def _handle_goodbye(self, lang: str) -> None:
         """Play farewell message and return to IDLE."""
         logger.info("Goodbye intent detected")
@@ -385,7 +389,8 @@ class YonaApp:
         msg = messages.get(lang, messages.get("ko", "안녕히 계세요!"))
 
         # Play farewell via TTS — publish PHRASE_PLAYING so web UI shows the text
-        await self._sm.transition(CS.SPEAKING)
+        if self._sm.state != CS.SPEAKING:
+            await self._sm.transition(CS.SPEAKING)
         self._bus.publish_nowait(EventType.PHRASE_PLAYING, msg)
         await self._play_tts(msg)
         await self._bus.publish(EventType.PLAYBACK_DONE)
@@ -458,7 +463,6 @@ class YonaApp:
         "as the conversation. Preserve key facts, user preferences, topics "
         "discussed, and any commitments made. Keep it under 200 words."
     )
-
     _COMPRESS_NOTIFY_START: dict[str, str] = {
         "ko": "이전 대화 내용을 정리하고 있습니다. 잠시만 기다려 주세요.",
         "en": "Organizing our conversation. One moment please.",

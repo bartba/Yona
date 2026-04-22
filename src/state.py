@@ -27,6 +27,8 @@ from __future__ import annotations
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
+from src.events import EventType
+
 if TYPE_CHECKING:
     from src.events import EventBus
 
@@ -126,5 +128,4 @@ class StateMachine:
             )
         self._state = new_state
         if self._bus is not None:
-            from src.events import EventType
             await self._bus.publish(EventType.STATE_CHANGED, new_state)

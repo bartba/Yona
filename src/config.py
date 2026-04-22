@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -20,12 +21,18 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+_log = logging.getLogger(__name__)
+
 # Load .env into os.environ as early as possible so ${VAR} expansions work.
 load_dotenv()
 
 # Project root is two levels up from this file (src/config.py → src/ → project/).
 _ROOT = Path(__file__).parent.parent
 
+
+# Sentinel for "key not present" — distinguishes a missing key from an
+# explicit null value in YAML (both would otherwise return None).
+_MISSING: object = object()
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -34,15 +41,18 @@ _ROOT = Path(__file__).parent.parent
 def _expand(value: Any) -> Any:
     """Recursively expand ``${VAR}`` patterns using os.environ.
 
-    Missing variables are replaced with an empty string rather than raising,
-    so a typo in a variable name is immediately visible as a blank value.
+    Missing variables are substituted with an empty string and a WARNING is
+    logged so misconfiguration is visible at startup rather than at first use.
     """
     if isinstance(value, str):
-        return re.sub(
-            r"\$\{(\w+)\}",
-            lambda m: os.environ.get(m.group(1), ""),
-            value,
-        )
+        def _sub(m: re.Match) -> str:
+            name = m.group(1)
+            val = os.environ.get(name)
+            if val is None:
+                _log.warning("Config: environment variable ${%s} is not set (substituting empty string)", name)
+                return ""
+            return val
+        return re.sub(r"\$\{(\w+)\}", _sub, value)
     if isinstance(value, dict):
         return {k: _expand(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -89,8 +99,8 @@ class Config:
         for part in key.split("."):
             if not isinstance(node, dict):
                 return default
-            node = node.get(part, None)
-            if node is None:
+            node = node.get(part, _MISSING)
+            if node is _MISSING:
                 return default
         return node
 

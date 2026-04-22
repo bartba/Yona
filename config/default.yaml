@@ -27,7 +27,7 @@ wake_word:
 vad:
   model_path: "models/silero_vad/silero_vad.onnx"
   threshold: 0.5                   # speech probability cutoff (LISTENING)
-  silence_duration: 1.5            # seconds of silence to end a speech segment (0.8 was too short for Korean pauses)
+  silence_duration: 1.5            # seconds of silence to end a speech segment. Tuned up from 0.8 s — shorter values cut off natural Korean pauses mid-sentence.
   min_speech_duration: 0.3         # minimum speech length to accept
   barge_in_threshold: 0.95          # higher threshold during SPEAKING (AEC residual)
 
@@ -41,7 +41,9 @@ stt:
   lang_recheck_min_prob: 0.3       # min language_probability to accept a forced-language recheck result
 
 llm:
-  # Provider selection: "openai" , "claude" or "custom"
+  # Provider selection: "openai", "claude", "custom", or "api"
+  #   - "api" bypasses the LLM and POSTs the STT text to an arbitrary HTTP
+  #     endpoint; the full response is played back via TTS in one shot.
   provider: "${LLM_PROVIDER}"
 
   # --- OpenAI (provider=openai) ---
@@ -58,6 +60,15 @@ llm:
   custom_client_token: "${CUSTOM_LLM_CLIENT_TOKEN}"  # x-generative-ai-client (JWT)
   custom_model_id: "${CUSTOM_LLM_MODEL_ID}"          # UUID e.g. "0196f1fc-2858-70a9-..."
   custom_user_email: "${CUSTOM_LLM_USER_EMAIL}"      # optional portal email
+
+  # --- Arbitrary HTTP API (provider=api) ---
+  # LLM 대신 임의의 HTTP API에 단발 POST → 응답 전체를 한 번에 받아 TTS 재생.
+  api:
+    url: "${API_LLM_URL}"            # 필수. POST 대상 엔드포인트
+    auth_header: "${API_LLM_KEY}"    # 선택. Authorization 헤더값 (예: "Bearer xxx")
+    request_key: "query"             # 요청 body: {"<request_key>": "<STT 텍스트>"}
+    response_path: "response"        # 응답 JSON 텍스트 경로 (dot path, 예: "result.text")
+    timeout: 30                      # 요청 타임아웃(초)
 
   # --- Common ---
   max_tokens: 1024
@@ -77,6 +88,14 @@ tts:
   total_steps: 8                   # diffusion steps (fewer = faster, more = higher quality); 
   ort_intra_threads: 2             # ORT intra-op threads (Jetson 6 cores → 3 for ORT, 3 for audio/system)
   ort_inter_threads: 2             # ORT inter-op threads (1 = minimal cross-op parallelism)
+
+  # Silence padding around each synthesized phrase
+  leading_silence_sec: 0.05        # 50 ms — 첫 음소 attention clipping 방지 (기존 하드코딩 값)
+  trailing_silence_sec: 0.08       # 80 ms — 마지막 음소 tail cutoff 방지
+
+  # Supertonic internal chunking (구 길이가 임계값 미만이면 실질적으로 동작 안 함)
+  max_chunk_length: null            # null = 언어별 기본값 사용 (ko:120, en:300)
+  silence_duration: 0.1             # inter-chunk 묵음 (초); 기본값 0.3s보다 짧게 설정
 
   # --- Common ---
   output_sample_rate: 44100        # Supertonic native output rate
@@ -112,5 +131,7 @@ logging:
 
 web:
   enabled: true
-  host: "0.0.0.0"                 # LAN 접근 허용 (Jetson에 모니터 없는 환경)
+  host: "127.0.0.1"               # loopback only; set to 0.0.0.0 + allowed_hosts to expose on LAN
   port: 8080
+  # allowed_hosts:                # optional IP allowlist when host is 0.0.0.0
+  #   - "192.168.1.10"

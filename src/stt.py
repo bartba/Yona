@@ -18,14 +18,6 @@ Transcriber
     This corrects short utterances like "바이바이 맥" that Whisper may
     mis-identify as Japanese or French due to insufficient phoneme information.
 
-Usage::
-
-    from src.config import Config
-    from src.events import EventBus
-    from src.stt import Transcriber
-
-    transcriber = Transcriber(cfg, bus)
-    text = await transcriber.transcribe(audio_array, sample_rate=16_000)
 """
 
 from __future__ import annotations
@@ -131,6 +123,7 @@ class Transcriber:
                 "STT lang=%s (%.0f%%) not in allowed %s — retrying with forced languages",
                 lang, lang_prob * 100, self._allowed_languages,
             )
+            best_text, best_lang, best_prob = text, lang, lang_prob
             for forced_lang in self._allowed_languages:
                 r_text, r_lang, r_prob = await asyncio.to_thread(
                     self._run_transcribe, audio, forced_lang,
@@ -142,10 +135,13 @@ class Transcriber:
                         lang, lang_prob * 100, text,
                     )
                     break
+                if r_prob > best_prob:
+                    best_text, best_lang, best_prob = r_text, r_lang, r_prob
             else:
+                text, lang, lang_prob = best_text, best_lang, best_prob
                 logger.warning(
-                    "STT recheck: all forced langs below min_prob=%.1f — keeping 1st-pass result",
-                    self._lang_recheck_min_prob,
+                    "STT recheck: none met min_prob=%.1f — using best retry %s (%.0f%%)",
+                    self._lang_recheck_min_prob, lang, lang_prob * 100,
                 )
 
         self._detected_language = lang

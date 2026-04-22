@@ -2,26 +2,19 @@
 
 Defines all EventType values and an async EventBus (pub/sub, queue-based).
 
-Usage::
-
-    bus = EventBus()
-    q = bus.subscribe(EventType.WAKE_WORD_DETECTED)
-    await bus.publish(EventType.WAKE_WORD_DETECTED)
-    event = await q.get()
-
-From synchronous sounddevice callbacks use publish_nowait():
-
-    bus.publish_nowait(EventType.SPEECH_STARTED)
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import time
 from collections import defaultdict
 from enum import Enum, auto
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +23,7 @@ from typing import Any
 
 class EventType(Enum):
     # --- Detection ---
-    WAKE_WORD_DETECTED = auto()   # Porcupine detected wake phrase
+    WAKE_WORD_DETECTED = auto()   # openWakeWord detected wake phrase
     SPEECH_STARTED     = auto()   # VAD: voice activity began
     SPEECH_ENDED       = auto()   # VAD: voice activity stopped (silence)
     BARGE_IN_DETECTED  = auto()   # VAD: voice during SPEAKING → interrupt
@@ -49,7 +42,7 @@ class EventType(Enum):
     PLAYBACK_DONE    = auto()     # Speaker finished, queues drained
 
     # --- Session control ---
-    TIMEOUT_CHECK    = auto()     # 15 s idle → ask "아직 계세요?"
+    TIMEOUT_CHECK    = auto()     # 15 s idle → prompt user to confirm presence
     TIMEOUT_FINAL    = auto()     # 5 s more → farewell → IDLE
     GOODBYE_DETECTED = auto()     # Goodbye intent recognised
 
@@ -164,10 +157,10 @@ class EventBus:
                 try:
                     self._loop.call_soon_threadsafe(q.put_nowait, event)
                 except RuntimeError:
-                    pass  # loop closed
+                    _log.debug("publish_nowait: loop closed, dropped %s", event_type.name)
         else:
             for q in list(self._subscribers.get(event_type, [])):
                 try:
                     q.put_nowait(event)
                 except asyncio.QueueFull:
-                    pass
+                    _log.warning("publish_nowait: queue full, dropped %s", event_type.name)
